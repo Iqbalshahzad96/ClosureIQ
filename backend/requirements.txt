@@ -16,4 +16,4 @@ google-generativeai>=0.4.1
 chromadb>=0.4.24
 
 # MCP Integration (Python MCP SDK)
-mcp>=1.0.0
+mcp==2.1.1
