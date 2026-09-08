@@ -10,6 +10,7 @@ from app.api.routes import (
     insights,
     approvals,
     observability,
+    rag,
 )
 
 api_router = APIRouter()
@@ -21,3 +22,4 @@ api_router.include_router(exceptions.router)
 api_router.include_router(insights.router)
 api_router.include_router(approvals.router)
 api_router.include_router(observability.router)
+api_router.include_router(rag.router)
