@@ -192,7 +192,9 @@ def make_detect_exceptions_node(deps: WorkflowDeps):
     async def detect_exceptions_node(state: OrchestratorState) -> Dict[str, Any]:
         t0 = time.monotonic()
         try:
-            raw_exceptions = await deps.detect_exceptions(state.workflow_type, state.validation_results)
+            raw_exceptions = await deps.detect_exceptions(
+                state.workflow_type, state.validation_results, state.period
+            )
             exceptions = normalize_json_safe(raw_exceptions)
             elapsed = (time.monotonic() - t0) * 1000
             trace = _trace_entry("detect_exceptions", "ok", elapsed)

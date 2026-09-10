@@ -71,8 +71,8 @@ def make_fakes(
             raise validation_error
         return validation_result if validation_result is not None else {"matched": [], "unmatched": []}
 
-    async def fake_detect(wf_type: str, results: Dict[str, Any]) -> Any:
-        tracker.record("detect_exceptions", wf_type, results)
+    async def fake_detect(wf_type: str, results: Dict[str, Any], *args: Any) -> Any:
+        tracker.record("detect_exceptions", wf_type, results, *args)
         if detect_error:
             raise detect_error
         return exceptions_result if exceptions_result is not None else []
