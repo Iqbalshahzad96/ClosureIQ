@@ -1,106 +1,290 @@
-import React from 'react';
-import { Scale, AlertCircle, CheckCircle, Cpu, FileText, ArrowRight } from 'lucide-react';
-import MetricCard from '../components/MetricCard';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { ArrowRight } from 'lucide-react';
+import DashboardHeader from '../components/dashboard/DashboardHeader';
+import OverviewMetrics from '../components/dashboard/OverviewMetrics';
+import LatestWorkflowCard from '../components/dashboard/LatestWorkflowCard';
+import ExceptionsOverview from '../components/dashboard/ExceptionsOverview';
+import ObservabilitySummary from '../components/dashboard/ObservabilitySummary';
+import IngestionStatusCard from '../components/dashboard/IngestionStatusCard';
+import AgentArchitectureBanner from '../components/dashboard/AgentArchitectureBanner';
+
+import {
+  fetchReconciliationSummary,
+  fetchExceptions,
+  fetchPendingApprovals,
+  fetchObservabilityMetrics,
+  fetchObservabilityRuns,
+} from '../services/dashboardService';
+
+import {
+  normalizeSummary,
+  normalizeExceptions,
+  normalizeApprovals,
+  normalizeMetrics,
+  normalizeRuns,
+} from '../services/dashboardNormalizers';
 
 export default function DashboardPage({ setActiveTab }) {
+  const [summaryState, setSummaryState] = useState({
+    loading: true,
+    error: null,
+    data: normalizeSummary(null),
+  });
+
+  const [exceptionsState, setExceptionsState] = useState({
+    loading: true,
+    error: null,
+    data: normalizeExceptions([]),
+  });
+
+  const [approvalsState, setApprovalsState] = useState({
+    loading: true,
+    error: null,
+    data: normalizeApprovals([]),
+  });
+
+  const [metricsState, setMetricsState] = useState({
+    loading: true,
+    error: null,
+    data: normalizeMetrics(null),
+  });
+
+  const [runsState, setRunsState] = useState({
+    loading: true,
+    error: null,
+    data: normalizeRuns([]),
+  });
+
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const isMountedRef = useRef(true);
+  const abortControllersRef = useRef({
+    summary: null,
+    exceptions: null,
+    approvals: null,
+    metrics: null,
+    runs: null,
+  });
+
+  const requestGenerationsRef = useRef({
+    summary: 0,
+    exceptions: 0,
+    approvals: 0,
+    metrics: 0,
+    runs: 0,
+  });
+
+  /**
+   * Refetch an individual endpoint safely with generation ID and abort protection.
+   * Returns true on success, false on error or abort.
+   */
+  const fetchSection = useCallback(async (section) => {
+    // Abort previous in-flight request for this section
+    if (abortControllersRef.current[section]) {
+      abortControllersRef.current[section].abort();
+    }
+
+    const controller = new AbortController();
+    abortControllersRef.current[section] = controller;
+    const generation = ++requestGenerationsRef.current[section];
+
+    const setStateMap = {
+      summary: setSummaryState,
+      exceptions: setExceptionsState,
+      approvals: setApprovalsState,
+      metrics: setMetricsState,
+      runs: setRunsState,
+    };
+
+    const fetcherMap = {
+      summary: fetchReconciliationSummary,
+      exceptions: fetchExceptions,
+      approvals: fetchPendingApprovals,
+      metrics: fetchObservabilityMetrics,
+      runs: fetchObservabilityRuns,
+    };
+
+    const normalizerMap = {
+      summary: normalizeSummary,
+      exceptions: normalizeExceptions,
+      approvals: normalizeApprovals,
+      metrics: normalizeMetrics,
+      runs: normalizeRuns,
+    };
+
+    const setSectionState = setStateMap[section];
+    const fetcher = fetcherMap[section];
+    const normalizer = normalizerMap[section];
+
+    if (!setSectionState || !fetcher || !normalizer) return false;
+
+    setSectionState((prev) => ({ ...prev, loading: true, error: null }));
+
+    try {
+      const rawData = await fetcher({ signal: controller.signal });
+
+      if (
+        isMountedRef.current &&
+        requestGenerationsRef.current[section] === generation
+      ) {
+        const normalized = normalizer(rawData);
+        setSectionState({
+          loading: false,
+          error: null,
+          data: normalized,
+        });
+        return true;
+      }
+      return false;
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        return false;
+      }
+
+      if (
+        isMountedRef.current &&
+        requestGenerationsRef.current[section] === generation
+      ) {
+        setSectionState((prev) => ({
+          ...prev,
+          loading: false,
+          error: err.message || 'Service unavailable',
+        }));
+      }
+      return false;
+    }
+  }, []);
+
+  /**
+   * Global refresh: fetches all 5 sections concurrently using Promise.allSettled.
+   * Updates 'Last updated' timestamp only if at least one endpoint succeeds.
+   */
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+
+    const results = await Promise.allSettled([
+      fetchSection('summary'),
+      fetchSection('exceptions'),
+      fetchSection('approvals'),
+      fetchSection('metrics'),
+      fetchSection('runs'),
+    ]);
+
+    if (isMountedRef.current) {
+      const hasAnySuccess = results.some(
+        (res) => res.status === 'fulfilled' && res.value === true
+      );
+
+      if (hasAnySuccess) {
+        setLastUpdated(new Date());
+      }
+      setIsRefreshing(false);
+    }
+  }, [fetchSection]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    handleRefresh();
+
+    return () => {
+      isMountedRef.current = false;
+      Object.values(abortControllersRef.current).forEach((ctrl) => {
+        if (ctrl) ctrl.abort();
+      });
+    };
+  }, [handleRefresh]);
+
   return (
-    <div>
-      {/* Hero / Overview Header */}
-      <div style={{ marginBottom: '2rem' }}>
-        <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '0.5rem' }}>
-          ClosureIQ — AI-Powered Financial Close Assistant
-        </h1>
-        <p style={{ color: 'var(--text-secondary)', maxWidth: '750px', fontSize: '0.95rem' }}>
-          Accelerate month-end closing with deterministic financial matching, dual AI reasoning agents,
-          RAG-grounded accounting SOP compliance, and Human-in-the-Loop decision controls.
-        </p>
-      </div>
+    <main aria-label="ClosureIQ Dashboard">
+      {/* Header with Title, Last Updated, and Refresh */}
+      <DashboardHeader
+        lastUpdated={lastUpdated}
+        isRefreshing={isRefreshing}
+        onRefresh={handleRefresh}
+      />
 
-      {/* Quick Metrics */}
-      <div className="metrics-grid">
-        <MetricCard
-          title="Reconciliation Status"
-          value="98.4%"
-          subtitle="4,210 of 4,280 transactions matched"
-          icon={Scale}
-          color="var(--accent-emerald)"
-        />
-        <MetricCard
-          title="Active Exceptions"
-          value="12"
-          subtitle="4 high severity requiring review"
-          icon={AlertCircle}
-          color="var(--accent-amber)"
-        />
-        <MetricCard
-          title="AI Recommendations"
-          value="8 Pending"
-          subtitle="Grounded in accounting SOPs"
-          icon={Cpu}
-          color="var(--primary)"
-        />
-        <MetricCard
-          title="HITL Approvals"
-          value="94.2%"
-          subtitle="Historical acceptance rate"
-          icon={CheckCircle}
-          color="var(--accent-blue)"
-        />
-      </div>
+      {/* KPI Overview Metrics (Status, Active Exceptions, Approvals, Latency) */}
+      <OverviewMetrics
+        summaryState={summaryState}
+        exceptionsState={exceptionsState}
+        approvalsState={approvalsState}
+        metricsState={metricsState}
+        onRetrySummary={() => fetchSection('summary')}
+        onRetryExceptions={() => fetchSection('exceptions')}
+        onRetryApprovals={() => fetchSection('approvals')}
+        onRetryMetrics={() => fetchSection('metrics')}
+      />
 
-      {/* Two Specialized AI Agents Banner */}
-      <div className="card" style={{ marginBottom: '2rem', background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(31, 41, 55, 0.6) 100%)' }}>
-        <h2 style={{ fontSize: '1.15rem', fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <Cpu size={20} color="var(--primary)" />
-          Two-Agent Collaborative Intelligence Architecture
-        </h2>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '1.5rem' }}>
-          <div style={{ padding: '1rem', background: 'rgba(17, 24, 39, 0.5)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
-            <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: '#818cf8', marginBottom: '0.35rem' }}>
-              Agent 1: Financial Review Agent
-            </h3>
-            <p style={{ fontSize: '0.825rem', color: 'var(--text-secondary)' }}>
-              Evaluates ledger summary health, macro trends, and ensures period-over-period balance sanity.
-            </p>
-          </div>
-          <div style={{ padding: '1rem', background: 'rgba(17, 24, 39, 0.5)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
-            <h3 style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--accent-blue)', marginBottom: '0.35rem' }}>
-              Agent 2: Exception Analysis Agent
-            </h3>
-            <p style={{ fontSize: '0.825rem', color: 'var(--text-secondary)' }}>
-              Deep-dives into specific discrepancies, consults ChromaDB policy RAG, and proposes journal entries for human approval.
-            </p>
-          </div>
-        </div>
-      </div>
+      {/* Latest Workflow Execution Details */}
+      <LatestWorkflowCard
+        summaryState={summaryState}
+        runsState={runsState}
+        onRetry={() => {
+          fetchSection('summary');
+          fetchSection('runs');
+        }}
+      />
+
+      {/* Financial Exceptions Overview (Category & Severity Breakdown) */}
+      <ExceptionsOverview
+        exceptionsState={exceptionsState}
+        onRetry={() => fetchSection('exceptions')}
+      />
+
+      {/* Observability & Runtime Telemetry (Exact backend fields) */}
+      <ObservabilitySummary
+        metricsState={metricsState}
+        onRetry={() => fetchSection('metrics')}
+      />
+
+      {/* Honest Ingestion Empty / Readiness State */}
+      <IngestionStatusCard />
+
+      {/* Two Specialized AI Agents Banner with Corrected Copy */}
+      <AgentArchitectureBanner />
 
       {/* Quick Action Navigation */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '1rem' }}>
+      <nav
+        aria-label="Quick Navigation"
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+          gap: '1rem',
+          marginTop: '1rem',
+        }}
+      >
         <button
+          type="button"
           className="btn btn-secondary"
-          onClick={() => setActiveTab('reconciliation')}
+          onClick={() => setActiveTab && setActiveTab('reconciliation')}
           style={{ justifyContent: 'space-between', padding: '1rem 1.25rem' }}
+          aria-label="Navigate to Reconciliation Engine"
         >
           <span>Open Reconciliation Engine</span>
-          <ArrowRight size={16} />
+          <ArrowRight size={16} aria-hidden="true" />
         </button>
         <button
+          type="button"
           className="btn btn-secondary"
-          onClick={() => setActiveTab('exceptions')}
+          onClick={() => setActiveTab && setActiveTab('exceptions')}
           style={{ justifyContent: 'space-between', padding: '1rem 1.25rem' }}
+          aria-label="Navigate to Financial Exceptions"
         >
           <span>Inspect Financial Exceptions</span>
-          <ArrowRight size={16} />
+          <ArrowRight size={16} aria-hidden="true" />
         </button>
         <button
+          type="button"
           className="btn btn-secondary"
-          onClick={() => setActiveTab('approvals')}
+          onClick={() => setActiveTab && setActiveTab('approvals')}
           style={{ justifyContent: 'space-between', padding: '1rem 1.25rem' }}
+          aria-label="Navigate to HITL Approvals"
         >
           <span>Review HITL Approvals</span>
-          <ArrowRight size={16} />
+          <ArrowRight size={16} aria-hidden="true" />
         </button>
-      </div>
-    </div>
+      </nav>
+    </main>
   );
 }
