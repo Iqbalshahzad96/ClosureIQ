@@ -33,7 +33,7 @@ Reference_Docs/
 
 # Raw and Storage data
 data/raw/
-storage/raw/
+**/storage/raw/
 # Node / Frontend
 node_modules/
 npm-debug.log*
