@@ -12,7 +12,7 @@ export default function Header({ healthStatus }) {
           Month-End Financial Close Workspace
         </h2>
         <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-          Period: 2026-Q1
+          Period: Not selected
         </span>
       </div>
 

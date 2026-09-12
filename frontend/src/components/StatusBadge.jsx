@@ -5,6 +5,7 @@ export default function StatusBadge({ status, variant = 'indigo' }) {
     emerald: 'badge-emerald',
     amber: 'badge-amber',
     indigo: 'badge-indigo',
+    rose: 'badge-rose',
   }[variant] || 'badge-indigo';
 
   return (
