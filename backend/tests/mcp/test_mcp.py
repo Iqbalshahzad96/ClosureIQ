@@ -20,7 +20,8 @@ from sqlalchemy.pool import StaticPool
 # Import Base and models from the application.
 # Models register themselves on Base when imported.
 from app.database.database import Base
-from app.database.models import ExceptionRecord, FinancialRecord
+from app.database.models import ExceptionRecord
+from tests.canonical_fixtures import financial_record
 from app.mcp.tools import FinancialMCPTools
 
 
@@ -63,19 +64,19 @@ def seeded_session_factory(test_session_factory):
     try:
         # GL transactions for account 1010
         session.add_all([
-            FinancialRecord(
+            financial_record(session,
                 id="gl_001", source="GL", account_code="1010",
                 transaction_date=datetime(2026, 1, 15, 10, 0, 0),
                 amount=1000.00, description="Invoice A", reference="INV-001",
                 is_reconciled=False,
             ),
-            FinancialRecord(
+            financial_record(session,
                 id="gl_002", source="GL", account_code="1010",
                 transaction_date=datetime(2026, 2, 20, 14, 30, 0),
                 amount=2500.50, description="Invoice B", reference="INV-002",
                 is_reconciled=True,
             ),
-            FinancialRecord(
+            financial_record(session,
                 id="gl_003", source="GL", account_code="1010",
                 transaction_date=datetime(2026, 3, 5, 9, 0, 0),
                 amount=-500.00, description="Credit note", reference="CN-001",
@@ -85,7 +86,7 @@ def seeded_session_factory(test_session_factory):
 
         # GL transaction for a different account
         session.add(
-            FinancialRecord(
+            financial_record(session,
                 id="gl_004", source="GL", account_code="2020",
                 transaction_date=datetime(2026, 1, 10, 8, 0, 0),
                 amount=750.00, description="Other account", reference="OTH-001",
@@ -95,13 +96,13 @@ def seeded_session_factory(test_session_factory):
 
         # BANK transactions for account 1010
         session.add_all([
-            FinancialRecord(
+            financial_record(session,
                 id="bank_001", source="BANK", account_code="1010",
                 transaction_date=datetime(2026, 1, 16, 12, 0, 0),
                 amount=1000.00, description="Deposit A", reference="DEP-001",
                 is_reconciled=False,
             ),
-            FinancialRecord(
+            financial_record(session,
                 id="bank_002", source="BANK", account_code="1010",
                 transaction_date=datetime(2026, 2, 21, 11, 0, 0),
                 amount=2500.50, description="Deposit B", reference="DEP-002",
@@ -111,7 +112,7 @@ def seeded_session_factory(test_session_factory):
 
         # BANK transaction for a different account (2020)
         session.add(
-            FinancialRecord(
+            financial_record(session,
                 id="bank_003", source="BANK", account_code="2020",
                 transaction_date=datetime(2026, 1, 17, 9, 30, 0),
                 amount=750.00, description="Deposit C", reference="DEP-003",

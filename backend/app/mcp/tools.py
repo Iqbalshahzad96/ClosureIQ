@@ -23,8 +23,9 @@ class FinancialMCPTools:
         Defaults to ``None``; must be set before any tool is invoked.
     """
 
-    def __init__(self, session_factory: Optional[Callable[[], Session]] = None) -> None:
+    def __init__(self, session_factory: Optional[Callable[[], Session]] = None, organization_id: str = "default_org") -> None:
         self._session_factory = session_factory
+        self.organization_id = organization_id
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -64,125 +65,59 @@ class FinancialMCPTools:
     # ------------------------------------------------------------------
 
     async def get_account_balance(self, account_code: str, period: str) -> Dict[str, Any]:
-        """Fetch balance for a given account code and period.
+        """Blocked until an agreed period/date-range and opening-balance contract exists."""
+        raise NotImplementedError("get_account_balance requires an agreed period/date-range contract")
 
-        .. warning::
+    async def query_gl_transactions(self, account_code: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Canonical postings only; signed amount is debit minus credit.
 
-            **Not implemented.** ``FinancialRecord`` has no ``period`` or
-            ``currency`` column. Returning an all-time sum as a period
-            balance would be silently incorrect. This tool is blocked
-            until the team agrees on a period-string → date-range mapping
-            and a currency source.
-
-        Raises
-        ------
-        NotImplementedError
-            Always. This tool must not be registered until the contract is resolved.
+        Original debit/credit columns and draft status remain visible. No source
+        filenames, headers or ERP transformations are used by this query.
         """
-        raise NotImplementedError(
-            "get_account_balance is blocked: FinancialRecord has no 'period' or "
-            "'currency' column. A period-to-date-range mapping contract must be "
-            "agreed upon before this tool can be implemented."
-        )
-
-    # ------------------------------------------------------------------
-    # Implemented tools
-    # ------------------------------------------------------------------
-
-    async def query_gl_transactions(
-        self, account_code: str, limit: int = 50
-    ) -> List[Dict[str, Any]]:
-        """Query general ledger line items filtered by account code.
-
-        Parameters
-        ----------
-        account_code : str
-            The account code to filter on.
-        limit : int
-            Maximum number of rows to return (default 50).
-
-        Returns
-        -------
-        list[dict]
-            Each dict contains: id, source, account_code, transaction_date
-            (ISO-8601), amount, description, reference, is_reconciled.
-        """
-        from app.database.models import FinancialRecord
-
+        from app.database.models import Account, JournalEntry, JournalLine
         self._validate_limit(limit)
         session = self._get_session()
         try:
-            rows = (
-                session.query(FinancialRecord)
-                .filter(
-                    FinancialRecord.source == "GL",
-                    FinancialRecord.account_code == account_code,
-                )
-                .order_by(FinancialRecord.transaction_date.desc())
-                .limit(limit)
-                .all()
-            )
-            return [
-                {
-                    "id": r.id,
-                    "source": r.source,
-                    "account_code": r.account_code,
-                    "transaction_date": self._serialize_datetime(r.transaction_date),
-                    "amount": r.amount,
-                    "description": r.description,
-                    "reference": r.reference,
-                    "is_reconciled": r.is_reconciled,
-                }
-                for r in rows
-            ]
+            rows = (session.query(JournalLine, JournalEntry, Account)
+                .join(JournalEntry, JournalLine.journal_entry_id == JournalEntry.id)
+                .join(Account, JournalLine.account_id == Account.id)
+                .filter(Account.account_code == account_code,
+                        Account.organization_id == self.organization_id,
+                        JournalEntry.organization_id == self.organization_id,
+                        JournalEntry.currency_code == Account.currency_code)
+                .order_by(JournalEntry.entry_date.desc(), JournalLine.id)
+                .limit(limit).all())
+            return [{'id':line.id,'source':'GL','account_code':account.account_code,
+                     'transaction_date':self._serialize_datetime(entry.entry_date),
+                     'amount':float(line.debit_amount-line.credit_amount),
+                     'debit_amount':str(line.debit_amount),'credit_amount':str(line.credit_amount),
+                     'currency_code':entry.currency_code,'entry_status':entry.status,
+                     'description':line.description or entry.description,'reference':entry.reference,
+                     'is_reconciled':line.is_reconciled} for line,entry,account in rows]
         finally:
             session.close()
 
-    async def query_bank_transactions(
-        self, account_code: str, limit: int = 50
-    ) -> List[Dict[str, Any]]:
-        """Query bank statement line items filtered by account code.
-
-        Parameters
-        ----------
-        account_code : str
-            The account code to filter on.
-        limit : int
-            Maximum number of rows to return (default 50).
-
-        Returns
-        -------
-        list[dict]
-            Same schema as ``query_gl_transactions``.
-        """
-        from app.database.models import FinancialRecord
-
+    async def query_bank_transactions(self, account_code: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Independent canonical bank statements linked to the requested GL account."""
+        from app.database.models import Account, BankAccount, BankTransaction
         self._validate_limit(limit)
         session = self._get_session()
         try:
-            rows = (
-                session.query(FinancialRecord)
-                .filter(
-                    FinancialRecord.source == "BANK",
-                    FinancialRecord.account_code == account_code,
-                )
-                .order_by(FinancialRecord.transaction_date.desc())
-                .limit(limit)
-                .all()
-            )
-            return [
-                {
-                    "id": r.id,
-                    "source": r.source,
-                    "account_code": r.account_code,
-                    "transaction_date": self._serialize_datetime(r.transaction_date),
-                    "amount": r.amount,
-                    "description": r.description,
-                    "reference": r.reference,
-                    "is_reconciled": r.is_reconciled,
-                }
-                for r in rows
-            ]
+            rows = (session.query(BankTransaction, Account)
+                .join(BankAccount, BankTransaction.bank_account_id == BankAccount.id)
+                .join(Account, BankAccount.linked_gl_account_id == Account.id)
+                .filter(Account.account_code == account_code,
+                        Account.organization_id == self.organization_id,
+                        BankAccount.organization_id == self.organization_id,
+                        BankTransaction.currency_code == BankAccount.currency_code,
+                        BankAccount.currency_code == Account.currency_code)
+                .order_by(BankTransaction.booking_date.desc(), BankTransaction.id)
+                .limit(limit).all())
+            return [{'id':row.id,'source':'BANK','account_code':account.account_code,
+                     'transaction_date':self._serialize_datetime(row.booking_date),
+                     'amount':float(row.amount),'currency_code':row.currency_code,
+                     'description':row.description,'reference':row.bank_reference,
+                     'is_reconciled':row.is_reconciled} for row,account in rows]
         finally:
             session.close()
 
@@ -213,7 +148,7 @@ class FinancialMCPTools:
                 "period": record.period,
                 "category": record.category,
                 "severity": record.severity,
-                "amount_variance": record.amount_variance,
+                "amount_variance": float(record.amount_variance) if record.amount_variance is not None else 0.0,
                 "description": record.description,
                 "status": record.status,
                 "created_at": self._serialize_datetime(record.created_at),

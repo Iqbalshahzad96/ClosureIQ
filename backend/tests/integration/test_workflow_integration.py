@@ -34,7 +34,8 @@ from sqlalchemy.pool import StaticPool
 from app.agents.exception_analysis import ExceptionAnalysisAgent
 from app.agents.financial_review import FinancialReviewAgent
 from app.database.database import Base, get_db
-from app.database.models import ExceptionRecord, FinancialRecord
+from app.database.models import ExceptionRecord
+from tests.canonical_fixtures import financial_record
 from app.financial_engine.accrual import AccrualEngine
 from app.financial_engine.depreciation import DepreciationEngine
 from app.financial_engine.exceptions import ExceptionGenerator
@@ -235,12 +236,12 @@ def test_clean_reconciliation_skips_agents_and_hitl(workflow_test_env):
     # Seed matching GL and Bank transactions for account 1010
     session = factory()
     session.add_all([
-        FinancialRecord(
+        financial_record(session,
             id="gl_001", source="GL", account_code="1010",
             transaction_date=datetime(2026, 1, 15, 10, 0, 0),
             amount=1000.00, reference="INV-1001", is_reconciled=False,
         ),
-        FinancialRecord(
+        financial_record(session,
             id="bank_001", source="BANK", account_code="1010",
             transaction_date=datetime(2026, 1, 15, 12, 0, 0),
             amount=1000.00, reference="INV-1001", is_reconciled=False,
@@ -280,20 +281,20 @@ def test_exception_flow_pauses_at_hitl_with_grounded_recommendations(workflow_te
     # Seed unmatched transactions (1 matched, 1 unmatched GL, 1 unmatched BANK)
     session = factory()
     session.add_all([
-        FinancialRecord(
+        financial_record(session,
             id="gl_match", source="GL", account_code="1010",
             amount=500.00, reference="MATCH-01", is_reconciled=False,
         ),
-        FinancialRecord(
+        financial_record(session,
             id="bank_match", source="BANK", account_code="1010",
             amount=500.00, reference="MATCH-01", is_reconciled=False,
         ),
-        FinancialRecord(
+        financial_record(session,
             id="gl_unmatched", source="GL", account_code="1010",
             amount=2500.00, reference="UNMATCH-GL", description="Unreconciled invoice",
             is_reconciled=False,
         ),
-        FinancialRecord(
+        financial_record(session,
             id="bank_unmatched", source="BANK", account_code="1010",
             amount=750.00, reference="UNMATCH-BK", description="Unrecognized fee deposit",
             is_reconciled=False,
@@ -337,7 +338,7 @@ def test_hitl_approval_and_rejection_resumes_same_run(workflow_test_env):
     # 1. Seed unmatched transaction
     session = factory()
     session.add(
-        FinancialRecord(
+        financial_record(session,
             id="gl_disc_1", source="GL", account_code="1010",
             amount=1500.00, reference="DISC-01", is_reconciled=False,
         )
@@ -391,7 +392,7 @@ def test_decision_case_insensitivity_and_invalid_decision_handling(workflow_test
 
     session = factory()
     session.add(
-        FinancialRecord(
+        financial_record(session,
             id="gl_case_test", source="GL", account_code="1010",
             amount=800.00, reference="CASE-01", is_reconciled=False,
         )
@@ -433,7 +434,7 @@ def test_duplicate_run_id_returns_409(workflow_test_env):
 
     session = factory()
     session.add(
-        FinancialRecord(
+        financial_record(session,
             id="gl_dup_1", source="GL", account_code="1010",
             amount=500.00, reference="DUP-01", is_reconciled=False,
         )
@@ -465,7 +466,7 @@ def test_concurrent_and_second_resume_on_terminal_run_returns_409(workflow_test_
 
     session = factory()
     session.add(
-        FinancialRecord(
+        financial_record(session,
             id="gl_conflict_test", source="GL", account_code="1010",
             amount=900.00, reference="CONF-01", is_reconciled=False,
         )
@@ -522,7 +523,7 @@ def test_period_preservation(workflow_test_env):
 
     session = factory()
     session.add(
-        FinancialRecord(
+        financial_record(session,
             id="gl_period_test", source="GL", account_code="1010",
             amount=1250.00, reference="PER-01", is_reconciled=False,
         )
@@ -558,11 +559,11 @@ def test_exact_persistence_count_and_no_duplicates(workflow_test_env):
 
     session = factory()
     session.add_all([
-        FinancialRecord(
+        financial_record(session,
             id="gl_cnt_1", source="GL", account_code="1010",
             amount=111.00, reference="CNT-01", is_reconciled=False,
         ),
-        FinancialRecord(
+        financial_record(session,
             id="bank_cnt_2", source="BANK", account_code="1010",
             amount=222.00, reference="CNT-02", is_reconciled=False,
         ),
@@ -670,7 +671,7 @@ def test_exceptions_persist_once_and_are_queryable(workflow_test_env):
 
     session = factory()
     session.add(
-        FinancialRecord(
+        financial_record(session,
             id="gl_persist_1", source="GL", account_code="1010",
             amount=4200.00, reference="PERSIST-01", is_reconciled=False,
         )
@@ -945,7 +946,7 @@ def test_shared_checkpointer_across_separate_http_requests(workflow_test_env):
 
     session = factory()
     session.add(
-        FinancialRecord(
+        financial_record(session,
             id="gl_state_test", source="GL", account_code="1010",
             amount=990.00, reference="STATE-REF", is_reconciled=False,
         )
