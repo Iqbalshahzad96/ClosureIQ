@@ -28,7 +28,12 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+Reference_DOCS/
+Reference_Docs/
 
+# Raw and Storage data
+data/raw/
+storage/raw/
 # Node / Frontend
 node_modules/
 npm-debug.log*

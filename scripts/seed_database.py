@@ -17,6 +17,7 @@ def seed():
     """Create tables and seed initial records."""
     print("Initializing database schema...")
     if engine is not None and Base.metadata is not None:
+        Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
         print("Database tables created successfully.")
     else:

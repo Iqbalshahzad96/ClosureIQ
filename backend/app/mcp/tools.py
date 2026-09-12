@@ -213,7 +213,7 @@ class FinancialMCPTools:
                 "period": record.period,
                 "category": record.category,
                 "severity": record.severity,
-                "amount_variance": record.amount_variance,
+                "amount_variance": float(record.amount_variance) if record.amount_variance is not None else 0.0,
                 "description": record.description,
                 "status": record.status,
                 "created_at": self._serialize_datetime(record.created_at),
