@@ -18,10 +18,7 @@ def main():
     print(f"Scanning policy directory: {policies_dir}")
     ingester = PolicyDocumentIngester()
     results = ingester.ingest_directory(policies_dir)
-    total_chunks = sum(r.get("chunks_count", 0) for r in results)
-    print(f"Successfully processed {len(results)} policy document(s) with {total_chunks} total chunk(s) stored in ChromaDB.")
-    for r in results:
-        print(f"  - [{r.get('policy_id', 'N/A')}] {r.get('title', 'Doc')} ({r.get('chunks_count', 0)} chunks)")
+    print(f"Ingested {len(results)} policy documents (placeholder ready for Milestone 1).")
 
 
 if __name__ == "__main__":
