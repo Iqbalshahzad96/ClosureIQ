@@ -28,8 +28,7 @@ _tools = FinancialMCPTools(session_factory=SessionLocal)
 # ---------------------------------------------------------------------------
 # NOTE: get_account_balance is intentionally NOT registered.
 #       It raises NotImplementedError because the period-to-date-range
-#       mapping contract has not been agreed upon, and FinancialRecord
-#       has no period or currency column.
+#       mapping/opening-balance contract has not been agreed upon.
 # ---------------------------------------------------------------------------
 
 

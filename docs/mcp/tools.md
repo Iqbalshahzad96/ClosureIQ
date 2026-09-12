@@ -1,48 +1,29 @@
-# Model Context Protocol (MCP) Tool Specifications
+# MCP tool contracts
 
-## Overview
-Exposes a controlled tool interface for AI agents to query SQLite database models without giving raw SQL injection or direct unrestricted table access.
+[Project entry point](../../README.md) | [Architecture and setup](../architecture/overview.md) | [Ingestion](../ingestion/pipeline.md)
 
-All tool parameters are JSON-serializable (`str`, `int`). SQLAlchemy sessions are managed internally by the tool layer and never exposed to callers. All `datetime` values are serialized as ISO-8601 strings.
+`MCPServer` registers three SQLAlchemy-backed tools. The workflow calls `FinancialMCPTools` in-process; it does not make an MCP transport round trip. No standalone transport launch command is supplied. API exception queries and ingestion also use SQLAlchemy directly, so database access is not exclusively through MCP.
 
-## Limit Parameter
+Sources: [registration](../../backend/app/mcp/server.py), [tools](../../backend/app/mcp/tools.py), [workflow service](../../backend/app/services/workflow_service.py).
 
-Both `query_gl_transactions` and `query_bank_transactions` accept an optional `limit` parameter:
-- **Default:** `50`
-- **Accepted range:** `1` through `100` inclusive
-- **Invalid values** (less than 1 or greater than 100) raise a tool error (`ValueError`) with the message: `"limit must be between 1 and 100"`
-- Validation occurs before any database session is opened.
+## Shared query contract
 
-## Registered MCP Tools
+Both transaction queries accept `account_code: str` and `limit: int = 50`. Limits outside 1-100 raise `ValueError("limit must be between 1 and 100")` before opening a session. Sessions are managed internally, dates serialize as ISO-8601 or null, and results are newest-first with ID ordering for ties. The tool instance scopes queries to `organization_id`, default `default_org`.
 
-### 1. `query_gl_transactions(account_code: str, limit: int = 50)`
-Returns filtered General Ledger line items for the given account code.
-- Filters: `source="GL"`, `account_code` match
-- Ordering: `transaction_date` descending
-- Limit: default `50`, accepted range `1–100`, invalid values raise a tool error
-- Returns: `list[{id, source, account_code, transaction_date, amount, description, reference, is_reconciled}]`
+## Registered tools
 
-### 2. `query_bank_transactions(account_code: str, limit: int = 50)`
-Returns filtered Bank Statement line items for the given account code.
-- Filters: `source="BANK"`, `account_code` match
-- Ordering: `transaction_date` descending
-- Limit: default `50`, accepted range `1–100`, invalid values raise a tool error
-- Returns: same schema as `query_gl_transactions`
+| Tool | Canonical query and result |
+|---|---|
+| `query_gl_transactions(account_code, limit=50)` | Joins `journal_lines`, `journal_entries` and `accounts`; filters account code, account/entry organization and matching currency. Orders by entry date then line ID. Includes DRAFT extracts. |
+| `query_bank_transactions(account_code, limit=50)` | Joins `bank_transactions` to `bank_accounts` and its linked GL account. Filters account code, organization and matching transaction/bank/GL currencies. Orders by booking date then transaction ID. |
+| `get_exception_details(exception_id)` | Finds an exception by primary key; returns `exception_id`, `period`, `category`, `severity`, `amount_variance`, `description`, `status`, `created_at`, `found`. Missing IDs return `found=false`. |
 
-### 3. `get_exception_details(exception_id: str)`
-Returns structured anomaly record by primary key.
-- Returns: `{exception_id, period, category, severity, amount_variance, description, status, created_at, found}`
-- `found` is `false` if no record exists for the given ID.
+Transaction output shares `id`, `source` (`GL`/`BANK`), `account_code`, `transaction_date`, `amount`, `description`, `reference`, `is_reconciled` and `currency_code`. GL output also carries original `debit_amount`/`credit_amount` strings and `entry_status`; its float `amount` is debit minus credit. Bank output uses its signed statement amount.
 
-## Pending / Blocked Tools
+`financial_records` is retained for schema compatibility but is no longer read. Existing legacy-only data needs migration/import. ERP column/layout handling stays in [adapters](../ingestion/pipeline.md), not tools or agents. Queries still cap rows and do not accept a period/date filter; matching does not prove financial coverage or complete vouchers.
 
-### `get_account_balance(account_code: str, period: str)` — NOT REGISTERED
-**Status: Blocked**
+## Blocked balance tool
 
-This tool is not implemented or registered because:
-1. `FinancialRecord` has no `period` column — there is no agreed-upon mapping from a period string (e.g. `"2026-Q1"`) to a `transaction_date` range.
-2. `FinancialRecord` has no `currency` column — returning a hardcoded currency would be incorrect.
+`get_account_balance(account_code, period)` raises `NotImplementedError` and is not registered. It requires an agreed period/date-range and opening-balance contract. The previous guide's explanation based on missing legacy currency columns is obsolete: canonical models now contain currencies, but the balance contract remains unresolved.
 
-Returning an all-time sum and pretending it is a period balance is explicitly prohibited.
-
-**Resolution required:** The team must agree on a period-to-date-range contract and decide whether currency is added to the model or sourced externally before this tool can be implemented.
+Tests: [MCP](../../backend/tests/mcp/test_mcp.py), [canonical ingestion consumption](../../backend/tests/ingestion/test_service_integration.py).

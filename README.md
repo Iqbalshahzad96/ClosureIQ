@@ -1,225 +1,66 @@
-# ClosureIQ — AI-Powered Financial Close Assistant
+# ClosureIQ
 
-> An academic AI capstone project built to accelerate and automate month-end financial closing workflows with deterministic financial validation, two collaborative AI agents, policy grounding via RAG, MCP-controlled data access, and mandatory Human-in-the-Loop approval gates.
+## Project overview
 
----
+ClosureIQ is a financial close assistant built as an academic capstone. It combines deterministic accounting checks, two AI agents, policy retrieval and human review to help accountants investigate month-end exceptions.
 
-## 1. Overview
+## Core features
 
-During month-end close, accounting teams must reconcile general ledger transactions against bank feeds, validate expense accruals, verify fixed asset depreciation schedules, and resolve anomalies.
+- Financial-file ingestion: Enquest ledger/trial balance and generic bank, AP invoice and asset adapters, with validation, quarantine and source lineage.
+- Bank reconciliation, accrual review and straight-line depreciation validation.
+- Two agents for financial review and policy-grounded exception analysis.
+- Backend human approval/rejection of workflow results.
 
-**ClosureIQ** provides an intelligent assistant that:
-1. **Performs deterministic financial validations**: Exact GL-to-Bank reconciliations, accrual variance analysis, and depreciation schedules (never delegating financial math to LLMs).
-2. **Detects financial exceptions**: Flags un-reconciled items, missing entries, and tolerance breaches.
-3. **Employs two specialized AI agents**:
-   - **Agent 1 (Financial Review Agent)**: Evaluates aggregate ledger health and period trends.
-   - **Agent 2 (Exception Analysis Agent)**: Performs root-cause analysis on individual exceptions.
-4. **Grounds recommendations via RAG**: Queries corporate accounting policies and SOPs from a ChromaDB vector store.
-5. **Enforces Human-in-the-Loop (HITL)**: Requires explicit accountant approval before any journal adjustments are accepted.
-6. **Maintains complete observability**: Logs run IDs, MCP tool executions, token usage, latencies, and human decisions.
+The backend implements these capabilities with integration limits: React workflow screens are mostly placeholders, accrual/depreciation runs still use supplied inputs, and approvals are held in memory. See the detailed guides for current scope.
 
----
+## Architecture
 
-## 2. MVP Financial Workflows
+React calls FastAPI. The ingestion service maps source files into canonical SQLite tables. WorkflowService uses LangGraph to coordinate MCP data queries, deterministic engines, two agents, ChromaDB policy retrieval and human review. Observability currently includes console logs and in-memory node traces.
 
-1. **GL-to-Bank Reconciliation**: Exact 1-to-1 matching and tolerance evaluation.
-2. **Accrual Review**: Detecting missing accruals and period variance anomalies.
-3. **Depreciation Validation**: Verifying straight-line schedule calculations against posted GL entries.
+## Tech stack
 
----
+React 18 / Vite, FastAPI / SQLAlchemy / SQLite, MCP, LangGraph, Google Gemini (`google-genai`), ChromaDB, openpyxl / xlrd, and pytest.
 
-## 3. System Architecture
+## Setup and run
 
-```mermaid
-flowchart TD
-    UI[React.js Frontend UI] -->|REST / JSON| API[FastAPI Backend API]
-    API --> ORCH[LangGraph AI Orchestrator]
+Use Python 3.11+ and Node.js 20. PowerShell, from the repository root:
 
-    subgraph AI Agents
-        ORCH --> AG1[Agent 1: Financial Review Agent]
-        ORCH --> AG2[Agent 2: Exception Analysis Agent]
-    end
-
-    subgraph Grounding & Data Layer
-        AG2 --> RAG[RAG Layer: LangChain + ChromaDB]
-        AG1 --> MCP[MCP Data Access Layer]
-        AG2 --> MCP
-        MCP --> DB[(SQLite Database)]
-    end
-
-    subgraph Observability
-        API -.-> OBS[Observability Layer\nLogs / Metrics / Traces / HITL Decisions]
-        ORCH -.-> OBS
-    end
-```
-
----
-
-## 4. Technology Stack
-
-| Layer | Technologies |
-|---|---|
-| **Backend & API** | Python 3.11, FastAPI, Pydantic v2, Uvicorn |
-| **AI Orchestration & Agents** | LangGraph, Google Gemini API, LangChain |
-| **Policy RAG** | ChromaDB (local persistence), LangChain |
-| **Data Access** | Python MCP SDK (Model Context Protocol), SQLite |
-| **Frontend UI** | React.js (Vite), Lucide Icons, Modern Vanilla CSS |
-| **Testing** | Pytest, Pytest-Asyncio, HTTPX |
-| **DevOps & Containers** | Docker, Docker Compose, Git & GitHub |
-
----
-
-## 5. Repository & Directory Structure
-
-```text
-ClosureIQ/
-│
-├── backend/
-│   ├── app/
-│   │   ├── api/routes/         # FastAPI endpoints (health, reconciliation, exceptions, insights, approvals, observability)
-│   │   ├── agents/             # Agent 1 (Financial Review) & Agent 2 (Exception Analysis)
-│   │   ├── orchestrator/       # LangGraph graph, state, and workflow nodes
-│   │   ├── financial_engine/   # Deterministic math: reconciliation, accrual, depreciation, exceptions
-│   │   ├── rag/                # Document ingestion, vectorstore, and policy retriever
-│   │   ├── mcp/                # MCP server and financial data tools
-│   │   ├── database/           # SQLite connection, SQLAlchemy models, Pydantic schemas
-│   │   ├── observability/      # Structured logging, metrics collector, run tracer
-│   │   ├── services/           # HITL approval service
-│   │   ├── config.py           # Application settings
-│   │   └── main.py             # FastAPI app initialization
-│   ├── tests/                  # Pytest test suite
-│   ├── requirements.txt        # Python backend dependencies
-│   ├── Dockerfile
-│   └── .env.example
-│
-├── frontend/
-│   ├── src/
-│   │   ├── components/         # Header, Sidebar, MetricCard, StatusBadge
-│   │   ├── pages/              # Dashboard, Reconciliation, Exceptions, Approvals, Observability
-│   │   ├── layouts/            # MainLayout
-│   │   ├── services/           # API and health service client
-│   │   ├── hooks/              # Custom React hooks (useHealth)
-│   │   ├── types/              # Frontend types & enums
-│   │   ├── utils/              # Formatters & helpers
-│   │   ├── App.jsx             # Root React component
-│   │   └── main.jsx            # Entry point
-│   ├── package.json
-│   ├── vite.config.js
-│   ├── Dockerfile
-│   └── .env.example
-│
-├── data/
-│   ├── financial/              # Mock transaction and statement datasets
-│   ├── policies/               # Accounting SOPs and policy markdown documents
-│   └── sample/                 # Sample test fixtures
-│
-├── scripts/
-│   ├── seed_database.py        # Database setup and mock record seeder
-│   └── ingest_policies.py      # Policy vectorization script
-│
-├── docs/                       # Architecture, API, Agent, RAG, MCP, and Telemetry specifications
-├── docker-compose.yml
-├── .gitignore
-└── README.md
-```
-
----
-
-## 6. Team Ownership Matrix
-
-| Area | Primary Developer Ownership | Files / Modules |
-|---|---|---|
-| **Backend / AI Architecture** | **Developer 1** | `backend/app/api`<br>`backend/app/agents/financial_review.py`<br>`backend/app/orchestrator`<br>`backend/app/mcp`<br>`backend/app/observability` |
-| **Financial / RAG / Frontend** | **Developer 2** | `backend/app/financial_engine`<br>`backend/app/agents/exception_analysis.py`<br>`backend/app/rag`<br>`frontend`<br>`data` |
-
----
-
-## 7. Development Setup & Quickstart
-
-### Prerequisites
-- Python 3.10+ (recommended 3.11)
-- Node.js 18+ and npm
-- Git
-
-### 1. Backend Setup
-
-```bash
-# Navigate to backend directory
+```powershell
 cd backend
-
-# Create virtual environment
 python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+$env:DATABASE_URL = 'sqlite:///../closureiq.db'
+$env:CHROMA_PERSIST_DIRECTORY = './chroma_data'
+# Set GEMINI_API_KEY in this shell for live agent calls.
 
-# Activate virtual environment
-# Windows (PowerShell):
-.venv\Scripts\Activate.ps1
-# Linux / macOS:
-source .venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment variables
-cp .env.example .env
-
-# Run FastAPI dev server
-uvicorn app.main:app --reload --port 8000
+# Create missing tables; this does not migrate existing schemas.
+python -c "from app.database.database import Base, engine; import app.database.models; Base.metadata.create_all(bind=engine)"
+python ../scripts/ingest_policies.py
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
-Backend will be live at `http://localhost:8000` with Swagger UI at `http://localhost:8000/docs`.
 
-### 2. Frontend Setup
+Environment variables must be set explicitly; the backend does not automatically load `.env`. Policy ingestion may download an embedding model. Keep one worker because workflow checkpoints are in memory.
 
-```bash
-# Navigate to frontend directory
+**Do not use `scripts/seed_database.py` for routine initialization:** it drops/recreates tables and can erase imported data.
+
+In a second shell, from the repository root:
+
+```powershell
 cd frontend
-
-# Install dependencies
 npm install
-
-# Configure environment variables
-cp .env.example .env
-
-# Start Vite development server
 npm run dev
 ```
-Frontend will be live at `http://localhost:5173`.
 
-### 3. Running Backend Tests
+Frontend: http://localhost:5173. API schemas: http://localhost:8000/docs. Detailed configuration, database guidance, Docker and test commands are in the [developer guide](docs/architecture/overview.md#setup-database-initialization-and-running).
 
-```bash
-# Run pytest from backend directory
-cd backend
-pytest -v
-```
+## Documentation
 
----
-
-## 8. Docker Quickstart (Alternative)
-
-```bash
-# From repository root
-docker-compose up --build
-```
-- Frontend: `http://localhost:5173`
-- Backend API: `http://localhost:8000`
-
----
-
-## 9. Git Workflow
-
-We adhere to a clean feature-branch development workflow:
-
-```text
-feature/<feature-name>  ──►  develop  ──►  main
-```
-
-### Typical Feature Branches:
-- `feature/financial-engine`
-- `feature/mcp`
-- `feature/agent-1`
-- `feature/agent-2`
-- `feature/orchestrator`
-- `feature/rag`
-- `feature/react-ui`
-- `feature/observability`
-- `feature/hitl`
+- [Architecture, schema, setup, tests and project status](docs/architecture/overview.md)
+- [Financial ingestion, Enquest provenance and synthetic examples](docs/ingestion/pipeline.md)
+- [Agents, LangGraph branches and human review](docs/agents/specifications.md)
+- [API endpoints and examples](docs/api/endpoints.md)
+- [Financial engine rules](docs/financial_engine/rules.md)
+- [MCP tools](docs/mcp/tools.md)
+- [Policy ingestion and RAG](docs/rag/pipeline.md)
+- [Observability and audit](docs/observability/telemetry.md)
