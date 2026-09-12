@@ -597,15 +597,25 @@ def test_persistence_failure_rollback_rethrow_session_closed_and_agents_skipped(
     close_called = False
 
     class FailingSession:
+        def __init__(self):
+            self.fail_commit = False
+
         def get(self, *args, **kwargs):
             return None
-        def add(self, *args, **kwargs):
-            pass
+
+        def add(self, record):
+            # Reservation/audit writes are healthy; this legacy integration
+            # scenario targets only exception-record persistence.
+            self.fail_commit = isinstance(record, ExceptionRecord)
+
         def commit(self):
-            raise RuntimeError("Simulated DB commit disk failure")
+            if self.fail_commit:
+                raise RuntimeError("Simulated DB commit disk failure")
+
         def rollback(self):
             nonlocal rollback_called
             rollback_called = True
+
         def close(self):
             nonlocal close_called
             close_called = True
