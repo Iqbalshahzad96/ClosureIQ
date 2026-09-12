@@ -2,14 +2,30 @@
 ClosureIQ FastAPI Application Entry Point
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api.routes import api_router
 from app.observability.logger import setup_logging
+from app.services.workflow_service import WorkflowService
 
 # Initialize structured logging
 logger = setup_logging()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan context manager.
+    Initializes application-lifetime singleton services.
+    ClosureIQ uses an in-memory MemorySaver checkpointer for the MVP,
+    requiring single-process, single-worker execution (uvicorn --workers 1).
+    """
+    app.state.workflow_service = WorkflowService()
+    logger.info("Application-lifetime WorkflowService initialized on app.state.")
+    yield
+
 
 def create_application() -> FastAPI:
     """Create and configure FastAPI application instance."""
@@ -19,6 +35,7 @@ def create_application() -> FastAPI:
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     # Configure CORS middleware
