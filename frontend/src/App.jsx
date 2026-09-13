@@ -5,6 +5,7 @@ import ReconciliationPage from './pages/ReconciliationPage';
 import ExceptionsPage from './pages/ExceptionsPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import ObservabilityPage from './pages/ObservabilityPage';
+import FinancialUploadPage from './pages/FinancialUploadPage';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -13,6 +14,8 @@ export default function App() {
     switch (activeTab) {
       case 'dashboard':
         return <DashboardPage setActiveTab={setActiveTab} />;
+      case 'financial-upload':
+        return <FinancialUploadPage setActiveTab={setActiveTab} />;
       case 'reconciliation':
         return <ReconciliationPage />;
       case 'exceptions':

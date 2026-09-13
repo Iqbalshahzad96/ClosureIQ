@@ -31,7 +31,7 @@ Sources: [route modules](../../backend/app/api/routes), [application registratio
 
 ## Financial uploads
 
-Use `filename` and `source_system_id` query parameters; `organization_id` defaults to `default_org`. Optional `adapter_key` and `batch_id` select an adapter/bind a batch. `X-Import-Options` accepts a JSON object such as `{"bank_account_id":"demo-bank","currency_code":"KES"}`. Send CSV/Excel bytes directly, not multipart. Configure canonical sources/accounts/mappings first.
+Use `filename` query parameter; `organization_id` defaults to `default_org`. `source_system_id` is optional; when omitted, a dedicated runtime source system isolated by organization and approved adapter is automatically created or reused. When an explicit `source_system_id` is provided, it must belong to the organization and be active. Optional `adapter_key` and `batch_id` select an adapter/bind a batch. `X-Import-Options` accepts a JSON object such as `{"bank_account_id":"demo-bank","currency_code":"KES"}`. Send CSV/Excel bytes directly, not multipart. Configure canonical sources/accounts/mappings first when using explicit source IDs.
 
 The response is an ingestion summary with batch/file IDs, status, row counts and diagnostics. A summary can report FAILED, QUARANTINED or PARTIAL even when HTTP succeeds: inspect the status. Invalid options return 422, oversize input 413, rejected service arguments 400 and unexpected import failures a generic 500. See the [ingestion contract and executable example](../ingestion/pipeline.md) and [route](../../backend/app/api/routes/imports.py).
 
