@@ -59,3 +59,4 @@ async def get_exception_details(exception_id: str) -> dict:
     Returns all exception fields plus a ``found`` boolean.
     """
     return await _tools.get_exception_details(exception_id=exception_id)
+

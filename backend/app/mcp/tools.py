@@ -156,3 +156,160 @@ class FinancialMCPTools:
             }
         finally:
             session.close()
+
+    async def query_fixed_assets(
+        self, category: Optional[str] = None, status: Optional[str] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Query canonical fixed assets register records with lifecycle parameters."""
+        from app.database.models import FixedAsset
+        self._validate_limit(limit)
+        session = self._get_session()
+        try:
+            query = session.query(FixedAsset).filter(FixedAsset.organization_id == self.organization_id)
+            if category:
+                query = query.filter(FixedAsset.category.ilike(f"%{category.strip()}%"))
+            if status:
+                query = query.filter(FixedAsset.status == status.strip().upper())
+            rows = query.order_by(FixedAsset.asset_name.asc(), FixedAsset.id).limit(limit).all()
+            return [
+                {
+                    "id": asset.id,
+                    "asset_code": asset.asset_code,
+                    "asset_name": asset.asset_name,
+                    "category": asset.category,
+                    "acquisition_date": self._serialize_datetime(asset.acquisition_date),
+                    "in_service_date": self._serialize_datetime(asset.in_service_date),
+                    "acquisition_cost": float(asset.acquisition_cost) if asset.acquisition_cost is not None else 0.0,
+                    "cost": float(asset.acquisition_cost) if asset.acquisition_cost is not None else 0.0,
+                    "salvage_value": float(asset.salvage_value) if asset.salvage_value is not None else 0.0,
+                    "useful_life_months": asset.useful_life_months or 0,
+                    "depreciation_method": asset.depreciation_method,
+                    "accumulated_depreciation": float(asset.accumulated_depreciation) if asset.accumulated_depreciation is not None else 0.0,
+                    "accumulated_depreciation_prior": float(asset.accumulated_depreciation) if asset.accumulated_depreciation is not None else 0.0,
+                    "book_value": float(asset.book_value) if asset.book_value is not None else 0.0,
+                    "currency_code": asset.currency_code,
+                    "status": asset.status,
+                    "disposal_date": self._serialize_datetime(asset.disposal_date),
+                    "asset_account_id": asset.asset_account_id,
+                    "accum_deprec_account_id": asset.accum_deprec_account_id,
+                    "deprec_expense_account_id": asset.deprec_expense_account_id,
+                }
+                for asset in rows
+            ]
+        finally:
+            session.close()
+
+    async def query_ap_invoices(
+        self, vendor_name: Optional[str] = None, status: Optional[str] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Query canonical accounts payable invoices."""
+        from app.database.models import APInvoice
+        self._validate_limit(limit)
+        session = self._get_session()
+        try:
+            query = session.query(APInvoice).filter(APInvoice.organization_id == self.organization_id)
+            if vendor_name:
+                query = query.filter(APInvoice.vendor_name.ilike(f"%{vendor_name.strip()}%"))
+            if status:
+                query = query.filter(APInvoice.status == status.strip().upper())
+            rows = query.order_by(APInvoice.invoice_date.desc(), APInvoice.id).limit(limit).all()
+            return [
+                {
+                    "id": inv.id,
+                    "vendor_name": inv.vendor_name,
+                    "vendor_code": inv.vendor_code,
+                    "invoice_number": inv.invoice_number,
+                    "invoice_date": self._serialize_datetime(inv.invoice_date),
+                    "due_date": self._serialize_datetime(inv.due_date),
+                    "currency_code": inv.currency_code,
+                    "subtotal_amount": float(inv.subtotal_amount) if inv.subtotal_amount is not None else 0.0,
+                    "tax_amount": float(inv.tax_amount) if inv.tax_amount is not None else 0.0,
+                    "total_amount": float(inv.total_amount) if inv.total_amount is not None else 0.0,
+                    "paid_amount": float(inv.paid_amount) if inv.paid_amount is not None else 0.0,
+                    "outstanding_amount": float(inv.outstanding_amount) if inv.outstanding_amount is not None else 0.0,
+                    "status": inv.status,
+                    "description": inv.description,
+                }
+                for inv in rows
+            ]
+        finally:
+            session.close()
+
+    async def query_trial_balance(
+        self, fiscal_period: Optional[str] = None, account_code: Optional[str] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Query canonical trial balance records with account details."""
+        from app.database.models import Account, TrialBalanceRecord
+        self._validate_limit(limit)
+        session = self._get_session()
+        try:
+            query = (
+                session.query(TrialBalanceRecord, Account)
+                .join(Account, TrialBalanceRecord.account_id == Account.id)
+                .filter(
+                    TrialBalanceRecord.organization_id == self.organization_id,
+                    Account.organization_id == self.organization_id,
+                )
+            )
+            if fiscal_period:
+                query = query.filter(TrialBalanceRecord.fiscal_period == fiscal_period.strip())
+            if account_code:
+                query = query.filter(Account.account_code == account_code.strip())
+            rows = query.order_by(TrialBalanceRecord.fiscal_period.desc(), Account.account_code.asc()).limit(limit).all()
+            return [
+                {
+                    "id": tb.id,
+                    "account_id": tb.account_id,
+                    "account_code": acc.account_code,
+                    "account_name": acc.account_name,
+                    "account_type": acc.account_type,
+                    "fiscal_period": tb.fiscal_period,
+                    "period_start": self._serialize_datetime(tb.period_start),
+                    "period_end": self._serialize_datetime(tb.period_end),
+                    "opening_balance": float(tb.opening_balance) if tb.opening_balance is not None else 0.0,
+                    "period_debit": float(tb.period_debit) if tb.period_debit is not None else 0.0,
+                    "period_credit": float(tb.period_credit) if tb.period_credit is not None else 0.0,
+                    "closing_balance": float(tb.closing_balance) if tb.closing_balance is not None else 0.0,
+                    "currency_code": tb.currency_code,
+                }
+                for tb, acc in rows
+            ]
+        finally:
+            session.close()
+
+    async def query_exceptions(
+        self,
+        period: Optional[str] = None,
+        category: Optional[str] = None,
+        severity: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Query financial exceptions with optional filters."""
+        from app.database.models import ExceptionRecord
+        self._validate_limit(limit)
+        session = self._get_session()
+        try:
+            query = session.query(ExceptionRecord).filter(ExceptionRecord.organization_id == self.organization_id)
+            if period:
+                query = query.filter(ExceptionRecord.period == period.strip())
+            if category:
+                query = query.filter(ExceptionRecord.category == category.strip().upper())
+            if severity:
+                query = query.filter(ExceptionRecord.severity == severity.strip().upper())
+            rows = query.order_by(ExceptionRecord.created_at.desc(), ExceptionRecord.id).limit(limit).all()
+            return [
+                {
+                    "id": rec.id,
+                    "exception_id": rec.id,
+                    "period": rec.period,
+                    "category": rec.category,
+                    "severity": rec.severity,
+                    "amount_variance": float(rec.amount_variance) if rec.amount_variance is not None else 0.0,
+                    "description": rec.description,
+                    "status": rec.status,
+                    "created_at": self._serialize_datetime(rec.created_at),
+                }
+                for rec in rows
+            ]
+        finally:
+            session.close()
