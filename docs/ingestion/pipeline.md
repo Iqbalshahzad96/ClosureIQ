@@ -25,13 +25,13 @@ flowchart LR
 
 Financial row parsing/mapping/persistence is bounded by configurable chunks (default 500). Raw bytes remain size-limited in memory; OOXML uses read-only worksheets and binary XLS uses xlrd. Original files are never edited. Audit events preserve source-file/sheet/row references, control rows, warnings and quarantine reasons. A parse failure rolls back the file's canonical records while retaining raw evidence; row persistence failures use savepoints. The contracts and limitations follow below.
 
-HTTP: `POST /api/v1/imports/upload?filename=demo.csv&source_system_id=<id>&organization_id=<org>` with the CSV/Excel bytes as the request body (`Content-Type: text/csv` or `application/octet-stream`). Optional `adapter_key` and `batch_id` query parameters select an adapter/bind a batch. Send canonical context such as `{"bank_account_id":"...","currency_code":"KES"}` in the `X-Import-Options` header. This is a raw-body upload, not multipart; browser screens are still future work.
+HTTP: `POST /api/v1/imports/upload?filename=demo.csv&organization_id=<org>` with the CSV/Excel bytes as the request body (`Content-Type: text/csv` or `application/octet-stream`). `source_system_id` is optional; when omitted, IngestionService automatically creates or reuses a runtime source system scoped to the organization and adapter. An explicit `source_system_id` may be supplied and must be active and valid for the organization. Optional `adapter_key` and `batch_id` query parameters select an adapter/bind a batch. Send canonical context such as `{"bank_account_id":"...","currency_code":"KES"}` in the `X-Import-Options` header. This is a raw-body upload, not multipart.
 
 Use a dedicated session for `IngestionService.ingest_file`/`ingest_path`. Sources must belong to the organization, account mappings must be reviewed/auto-mapped, and independent bank statements require a bank master linked to a canonical GL account. Do not use the destructive `scripts/seed_database.py` against imported data.
 
 ## Phase 2 implementation contract
 
-Entry points: [upload API](../../backend/app/api/routes/imports.py), `IngestionService.ingest_file(db, file_bytes, filename, ...)`, and `ingest_path(db, path, ...)`. Use a dedicated SQLAlchemy session. Existing source systems must be active and belong to the supplied organization; existing batches must match both source and organization. The service can create a generic runtime source when called without an ID, but the HTTP route requires a registered source ID.
+Entry points: [upload API](../../backend/app/api/routes/imports.py), `IngestionService.ingest_file(db, file_bytes, filename, ...)`, and `ingest_path(db, path, ...)`. Use a dedicated SQLAlchemy session. Existing source systems must be active and belong to the supplied organization; existing batches must match both source and organization. The HTTP upload route allows omitting `source_system_id`, creating or reusing a runtime source system isolated by organization and approved adapter.
 
 ### Adapters and detection
 
