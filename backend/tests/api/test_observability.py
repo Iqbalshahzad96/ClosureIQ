@@ -34,7 +34,8 @@ from sqlalchemy.pool import NullPool, StaticPool
 from app.agents.exception_analysis import ExceptionAnalysisAgent
 from app.agents.financial_review import FinancialReviewAgent
 from app.database.database import Base, get_db
-from app.database.models import AuditTrailRecord, FinancialRecord
+from app.database.models import AuditTrailRecord
+from tests.canonical_fixtures import financial_record
 from app.financial_engine.accrual import AccrualEngine
 from app.financial_engine.depreciation import DepreciationEngine
 from app.financial_engine.exceptions import ExceptionGenerator
@@ -206,8 +207,8 @@ def test_unique_run_counting_and_clean_close(test_client, db_session_factory):
     """Verify clean run records 1 run, 0 errors, 0 approvals, and persists audit events."""
     db = db_session_factory()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(FinancialRecord(id="gl_1", source="GL", account_code="1010", amount=100.0, description="Dep", is_reconciled=False, transaction_date=now))
-    db.add(FinancialRecord(id="bk_1", source="BANK", account_code="1010", amount=100.0, description="Dep", is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="gl_1", source="GL", account_code="1010", amount=100.0, description="Dep", is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="bk_1", source="BANK", account_code="1010", amount=100.0, description="Dep", is_reconciled=False, transaction_date=now))
     db.commit()
     db.close()
 
@@ -244,7 +245,7 @@ def test_hitl_pause_and_resume_without_double_counting(test_client, db_session_f
     """Verify HITL pause and resume updates the run without double counting total_runs."""
     db = db_session_factory()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(FinancialRecord(id="gl_unmatched_1", source="GL", account_code="2020", amount=500.0, description="Missing bank item", is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="gl_unmatched_1", source="GL", account_code="2020", amount=500.0, description="Missing bank item", is_reconciled=False, transaction_date=now))
     db.commit()
     db.close()
 
@@ -302,7 +303,7 @@ def test_rejected_decision_counting(test_client, db_session_factory):
     """Verify rejected HITL decision is counted correctly and not counted as approval."""
     db = db_session_factory()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(FinancialRecord(id="gl_rej_1", source="GL", account_code="3030", amount=999.0, is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="gl_rej_1", source="GL", account_code="3030", amount=999.0, is_reconciled=False, transaction_date=now))
     db.commit()
     db.close()
 
@@ -340,8 +341,8 @@ def test_list_runs_endpoint(test_client, db_session_factory):
     """Verify /api/v1/observability/runs lists active and completed runs."""
     db = db_session_factory()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(FinancialRecord(id="gl_list_1", source="GL", account_code="4040", amount=50.0, is_reconciled=False, transaction_date=now))
-    db.add(FinancialRecord(id="bk_list_1", source="BANK", account_code="4040", amount=50.0, is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="gl_list_1", source="GL", account_code="4040", amount=50.0, is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="bk_list_1", source="BANK", account_code="4040", amount=50.0, is_reconciled=False, transaction_date=now))
     db.commit()
     db.close()
 
@@ -368,7 +369,7 @@ def test_get_run_trace_detail_decomposition(test_client, db_session_factory):
     """Verify /api/v1/observability/runs/{run_id} returns detailed trace components."""
     db = db_session_factory()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(FinancialRecord(id="gl_trace_1", source="GL", account_code="5050", amount=123.45, description="Trace Test", is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="gl_trace_1", source="GL", account_code="5050", amount=123.45, description="Trace Test", is_reconciled=False, transaction_date=now))
     db.commit()
     db.close()
 
@@ -457,7 +458,7 @@ def test_error_count_in_metrics_on_workflow_failure(test_client, test_workflow_s
 
     db = db_session_factory()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(FinancialRecord(id="gl_err_1", source="GL", account_code="9999", amount=10.0, is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="gl_err_1", source="GL", account_code="9999", amount=10.0, is_reconciled=False, transaction_date=now))
     db.commit()
     db.close()
 
@@ -583,7 +584,7 @@ async def test_concurrent_hitl_idempotency(test_workflow_service, db_session_fac
     """Finding 5 & 6: Concurrent HITL resume on the same run allows only one resolution."""
     db = db_session_factory()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(FinancialRecord(id="gl_hitl_conc", source="GL", account_code="7777", amount=500.0, is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="gl_hitl_conc", source="GL", account_code="7777", amount=500.0, is_reconciled=False, transaction_date=now))
     db.commit()
     db.close()
 
@@ -618,7 +619,7 @@ async def test_full_trace_reconstruction_by_fresh_service(db_session_factory, fa
     agent_1, agent_2 = fake_agents
     db = db_session_factory()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    db.add(FinancialRecord(id="gl_recon_fresh", source="GL", account_code="8888", amount=777.0, is_reconciled=False, transaction_date=now))
+    db.add(financial_record(db, id="gl_recon_fresh", source="GL", account_code="8888", amount=777.0, is_reconciled=False, transaction_date=now))
     db.commit()
     db.close()
 
@@ -1005,7 +1006,7 @@ def test_every_audit_failure_returns_5xx_through_real_api(
     if "pending" in phase or phase == "resume":
         with db_session_factory() as db:
             db.add(
-                FinancialRecord(
+                financial_record(db,
                     id=f"gl-{run_id}", source="GL", account_code=run_id,
                     amount=10.0, is_reconciled=False,
                     transaction_date=datetime.now(timezone.utc).replace(tzinfo=None),
@@ -1065,7 +1066,7 @@ def test_every_audit_failure_returns_5xx_through_real_api(
 async def test_active_and_restarted_trace_are_exactly_equal(db_session_factory, fake_agents):
     with db_session_factory() as db:
         db.add(
-            FinancialRecord(
+            financial_record(db,
                 id="gl-parity", source="GL", account_code="PARITY", amount=25.0,
                 is_reconciled=False, transaction_date=datetime.now(timezone.utc).replace(tzinfo=None),
             )
@@ -1171,7 +1172,7 @@ async def test_concurrent_conflicting_hitl_decisions(test_workflow_service, db_s
     """Test concurrent conflicting HITL decisions on the same run: exactly one succeeds, one raises RunConflictError."""
     with db_session_factory() as db:
         db.add(
-            FinancialRecord(
+            financial_record(db,
                 id="gl-hitl-conflict",
                 source="GL",
                 account_code="CONF-HITL",
@@ -1240,7 +1241,7 @@ async def test_cancellation_during_workflow_start(test_workflow_service, db_sess
 
     with db_session_factory() as db:
         db.add(
-            FinancialRecord(
+            financial_record(db,
                 id="gl-cancel-start",
                 source="GL",
                 account_code="CANCEL-START",
@@ -1301,7 +1302,7 @@ async def test_cancellation_during_start_finalization(test_workflow_service, db_
     """Test cancellation during start finalization: clean single terminal snapshot without duplicates."""
     with db_session_factory() as db:
         db.add(
-            FinancialRecord(
+            financial_record(db,
                 id="gl-cancel-final",
                 source="GL",
                 account_code="CANCEL-FIN",
@@ -1349,7 +1350,7 @@ async def test_cancellation_during_workflow_resume(test_workflow_service, db_ses
     """Test cancellation during resume: handles CancelledError, persists honest cancelled terminal snapshot, cleans pending metrics."""
     with db_session_factory() as db:
         db.add(
-            FinancialRecord(
+            financial_record(db,
                 id="gl-cancel-resume",
                 source="GL",
                 account_code="CANCEL-RES",
@@ -1406,7 +1407,7 @@ async def test_cancellation_during_resumed_finalization(test_workflow_service, d
     """Test cancellation during resumed finalization completes cleanup once without duplicate events."""
     with db_session_factory() as db:
         db.add(
-            FinancialRecord(
+            financial_record(db,
                 id="gl-cancel-res-fin",
                 source="GL",
                 account_code="CANCEL-RES-FIN",
@@ -1453,7 +1454,7 @@ async def test_cancellation_during_cleanup_shielded(test_workflow_service, db_se
     """Test that cancellation during cleanup cannot corrupt or interrupt cleanup."""
     with db_session_factory() as db:
         db.add(
-            FinancialRecord(
+            financial_record(db,
                 id="gl-cancel-clean",
                 source="GL",
                 account_code="CANCEL-CLEAN",
@@ -1610,7 +1611,7 @@ def test_secure_storage_error_sanitizes_direct_and_nested_exceptions(test_client
     # First, restore healthy session factory to start a workflow that pauses at HITL
     test_workflow_service.session_factory = db_session_factory
     with db_session_factory() as db:
-        db.add(FinancialRecord(id="gl_sec_hitl", source="GL", account_code="SEC-HITL", amount=50.0, is_reconciled=False, transaction_date=datetime.now(timezone.utc).replace(tzinfo=None)))
+        db.add(financial_record(db, id="gl_sec_hitl", source="GL", account_code="SEC-HITL", amount=50.0, is_reconciled=False, transaction_date=datetime.now(timezone.utc).replace(tzinfo=None)))
         db.commit()
 
     start_hitl = test_client.post(

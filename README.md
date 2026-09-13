@@ -57,7 +57,7 @@ Frontend: http://localhost:5173. API schemas: http://localhost:8000/docs. Detail
 ## Documentation
 
 - [Architecture, schema, setup, tests and project status](docs/architecture/overview.md)
-- [Financial ingestion, Enquest provenance and synthetic examples](docs/ingestion/pipeline.md)
+- [Financial ingestion and explicit local source loading](docs/ingestion/pipeline.md#local-source-initialization)
 - [Agents, LangGraph branches and human review](docs/agents/specifications.md)
 - [API endpoints and examples](docs/api/endpoints.md)
 - [Financial engine rules](docs/financial_engine/rules.md)

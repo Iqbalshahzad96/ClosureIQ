@@ -208,3 +208,86 @@ The handoff attributed `base.py`, `storage.py`, five adapters, the registry and 
 The initial files were syntactically complete, including 26 adapter tests; no truncated function was found. However, detection searched compressed bytes, parsing failures could look like empty success, financial values/dates/IDs were silently defaulted, storage could overwrite/traverse paths, account resolution ignored mappings and invented EXPENSE accounts, all rows were materialized, and row persistence had no safe rollback boundary. Pipeline/service integration tests were absent. These were implementation defects rather than a reason to discard the interfaces, models or useful tests.
 
 Codex preserved those interfaces and the Phase 1 models, corrected defective paths, added reusable tabular readers and explicit validation, completed ingestion/audit persistence, added the upload route, moved MCP queries to canonical data, and extended the tests. Two incorrect test expectations were corrected: malformed TB parsing now raises an explicit error, and ambiguous useful-life units require explicit configuration instead of a numeric heuristic. Existing MCP/workflow assertions remain; their synthetic fixtures now populate canonical models. Legacy model compatibility remains tested by the Phase 1 database suite.
+
+## Local source initialization
+
+The optional [loading command](../../scripts/load_financial_sources.py) initializes a local SQLite database and imports explicitly selected external financial files through the existing Phase 2 service. It is a development initialization tool; application startup, frontend uploads and MCP queries do not depend on the command or `data/raw/`.
+
+```mermaid
+flowchart LR
+    P[Private reviewed manifest] --> M[Canonical masters and mappings]
+    E[External financial sources] --> A[Phase 2 adapters]
+    M --> V[Validation and business rules]
+    A --> V
+    V --> C[Canonical database and lineage]
+    V --> Q[Quarantine audit]
+    C --> T[Canonical MCP queries and workflows]
+```
+
+Financial rows are written exclusively by `IngestionService.ingest_path`; [loading.py](../../backend/app/ingestion/loading.py) creates only supporting accounts, source systems, reviewed account mappings and bank masters. Organization context uses existing `organization_id` fields, not a new organization table. Stable organization/key-derived UUIDs allow repeatable setup. Conflicting existing context or account codes fail rather than silently remap or overwrite accounts.
+
+Keep the actual JSON manifest with private inputs in an ignored location. Its schema is defined by `LoadPlan`; unknown fields are rejected. Paths in `files` are relative to `source_root`, itself relative to the manifest directory (or an explicitly supplied absolute source root). Input paths must stay within that root, exist and satisfy Phase 2 size limits. Files are selected explicitly; there is no recursive import or wildcard expansion.
+
+A minimal bank-source configuration has this shape; replace the configuration identifiers and file path with reviewed values before use:
+
+```json
+{
+  "version": 1,
+  "organization_id": "default_org",
+  "source_root": ".",
+  "accounts": [{
+    "key": "cash", "account_code": "CASH-01", "account_name": "Cash account",
+    "account_type": "ASSET", "normal_balance": "DEBIT", "currency_code": "KES"
+  }],
+  "sources": [{
+    "key": "statement-feed", "adapter_key": "generic_bank",
+    "source_type": "BANK", "display_name": "Statement feed"
+  }],
+  "mappings": [],
+  "bank_accounts": [{
+    "key": "bank", "bank_name": "Reviewed institution", "account_name": "Reviewed account",
+    "account_number_masked": "****", "gl_account_key": "cash", "currency_code": "KES"
+  }],
+  "files": [{
+    "source_key": "statement-feed", "path": "statement.csv",
+    "options": {"bank_account_key": "bank", "currency_code": "KES"}
+  }]
+}
+```
+
+For other source types, register `enquest_ledger`, `enquest_tb`, `generic_ap_invoice` or `generic_fixed_asset` with the appropriate ERP/sub-ledger source type and explicit file list. Ledger/TB mappings use objects with `source_key`, `source_account_key`, `account_key`, and nonempty `reviewed_by`. Ledger keys are filename stems; TB keys are account labels. The command stamps `reviewed_at` when creating the configured REVIEWED mapping; the person preparing the manifest is responsible for its accounting correctness. Do not label an unresolved identity as reviewed.
+
+TB files require explicit `currency_code` and `fiscal_period`. Bank files require `bank_account_key`, which resolves to the deterministic canonical bank UUID. Currency may otherwise come from source columns or explicit options. Ambiguous fixed-asset life columns require `useful_life_unit`. Missing monetary values receive no loader defaults. Unmapped ledger/TB rows remain quarantined by Phase 2; unknown bank configuration fails preflight. Account classifications and bank-to-GL identity must be established from reviewed context, not inferred from transaction similarity.
+
+From the repository root, with backend dependencies installed:
+
+```powershell
+# Check manifest references and file availability without opening/writing the target database.
+./backend/.venv/Scripts/python.exe scripts/load_financial_sources.py --manifest data/raw/loading.local.json --database closureiq.db --storage-root storage/raw --validate-only
+
+# Create missing tables and load; no tables/files are dropped or replaced.
+./backend/.venv/Scripts/python.exe scripts/load_financial_sources.py --manifest data/raw/loading.local.json --database closureiq.db --storage-root storage/raw --initialize
+
+# Rerun safely against the same database and configuration.
+./backend/.venv/Scripts/python.exe scripts/load_financial_sources.py --manifest data/raw/loading.local.json --database closureiq.db --storage-root storage/raw
+```
+
+`--database` and `--storage-root` are required, working-directory-relative or absolute local paths. The command does not use the application's implicit database URL. Point the running backend's `DATABASE_URL` at the intended initialized file separately. For an older incompatible schema, use a separate migration process or a new database; `--initialize` creates missing tables but does not migrate columns. Never use the destructive seed script for this workflow. Raw-copy metadata follows the existing Phase 2 working-directory convention; use a consistent working directory when accessing those copies.
+
+The JSON output contains file ordinals, adapter keys, batch/file UUIDs, counts and diagnostic codes, not source names or financial values. It checks `ImportBatch -> SourceFile -> record` audit references, journal lines/accounts and bank-to-GL links, then calls existing organization-scoped MCP GL/bank tools. AP, assets and TB remain available through canonical SQLAlchemy models; this command adds no new financial checks or automatic workflow extraction. MCP queries return at most 100 rows per account, so returned counts are samples of availability rather than complete account totals.
+
+Exit codes: **0** completed (warnings may be present), **2** review required due to quarantine/file failure or lineage issues, **1** configuration/storage/schema/unexpected failure. Context setup is atomic, while each Phase 2 file import commits independently; earlier successful files survive a later failure. Rerun after correcting the cause rather than resetting the database.
+
+Identical successfully parsed/quarantined bytes within the same source/organization return the original file/batch identity. Returned `retained_imported_rows`, `retained_quarantined_rows`, `stored_parse_status` and audit diagnostic counts preserve visibility on reruns. Changed adapter options for already imported bytes are rejected; renamed ledger files are also rejected because their names define account identity. Changed bytes are new imports, with Phase 2 business-duplicate warnings retained. Reprocessing corrected mappings for a quarantined file requires a separately designed workflow; it is not achieved by changing this manifest and silently replaying the file.
+
+The loader follows the current single-process import contract; it is not a distributed import coordinator. It neither reconstructs complete vouchers from account extracts nor certifies bank correspondence, data completeness or accounting correctness. Keep source data, private manifests and raw copies Git-ignored. Logs and shared technical documentation should contain no confidential row contents.
+
+Tests use isolated fixture workbooks/CSVs and in-memory SQLite, without private source dependencies:
+
+```powershell
+# From backend/, isolate application import-time stores before running tests.
+$env:DATABASE_URL = 'sqlite:///:memory:'
+$env:CHROMA_PERSIST_DIRECTORY = './chroma_data/loading-tests'
+./.venv/Scripts/python.exe -m pytest tests/loading tests/ingestion -q -p no:cacheprovider
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider
+```
