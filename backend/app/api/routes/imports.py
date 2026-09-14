@@ -18,7 +18,7 @@ def get_ingestion_service():
 
 @router.post("/upload")
 async def upload(request: Request, filename: str = Query(...),
-                 source_system_id: str = Query(...), organization_id: str = "default_org",
+                 source_system_id: str | None = Query(default=None), organization_id: str = "default_org",
                  adapter_key: str | None = None, batch_id: str | None = None,
                  x_import_options: str = Header(default="{}"),
                  db: Session = Depends(get_db), service: IngestionService = Depends(get_ingestion_service)):

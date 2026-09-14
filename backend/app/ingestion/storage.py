@@ -90,13 +90,22 @@ class RawStorageManager:
             f.write(file_bytes)
 
         # Relative path for portable storage reference
-        relative_path = os.path.relpath(target_path).replace("\\", "/")
+        try:
+            relative_path = os.path.relpath(target_path).replace("\\", "/")
+        except ValueError:
+            relative_path = os.path.relpath(target_path, root).replace("\\", "/")
         return relative_path, sha256, byte_size
 
     def read_file(self, relative_path: str) -> bytes:
         """Read bytes of an existing stored raw file."""
-        full_path = os.path.abspath(relative_path)
-        if not Path(full_path).resolve().is_relative_to(Path(self.base_storage_dir).resolve()):
+        root = Path(self.base_storage_dir).resolve()
+        try:
+            full_path = Path(os.path.abspath(relative_path)).resolve()
+        except Exception:
+            full_path = (root / relative_path).resolve()
+        if not full_path.is_relative_to(root):
+            full_path = (root / relative_path).resolve()
+        if not full_path.is_relative_to(root):
             raise ValueError("Storage path escapes root")
         with open(full_path, "rb") as f:
             return f.read()
