@@ -339,6 +339,31 @@ def _build_production_deps(
             item["period"] = effective_period
             serialized.append(item)
 
+        # Enrich exceptions with canonical record lineage when available
+        if mcp_tools is not None:
+            for item in serialized:
+                meta = item.get("metadata") or {}
+                lineage_info = None
+                try:
+                    if meta.get("source") == "GL" and meta.get("record", {}).get("id"):
+                        lineage_info = await mcp_tools.get_record_lineage("JOURNAL_LINE", meta["record"]["id"])
+                    elif meta.get("source") == "BANK" and meta.get("record", {}).get("id"):
+                        lineage_info = await mcp_tools.get_record_lineage("BANK_TRANSACTION", meta["record"]["id"])
+                    elif category == "DEPRECIATION" and meta.get("asset_id"):
+                        lineage_info = await mcp_tools.get_record_lineage("FIXED_ASSET", meta["asset_id"])
+                    elif category == "AP_REVIEW" and meta.get("invoice_id"):
+                        lineage_info = await mcp_tools.get_record_lineage("AP_INVOICE", meta["invoice_id"])
+                    elif meta.get("id"):
+                        if meta.get("source") == "GL":
+                            lineage_info = await mcp_tools.get_record_lineage("JOURNAL_LINE", meta["id"])
+                        elif meta.get("source") == "BANK":
+                            lineage_info = await mcp_tools.get_record_lineage("BANK_TRANSACTION", meta["id"])
+                except Exception as l_exc:
+                    logger.debug("Lineage lookup skipped for exception %s: %s", item.get("id"), l_exc)
+
+                if lineage_info and lineage_info.get("found"):
+                    item["lineage"] = lineage_info
+
         # Persist exceptions idempotently to existing exception_records & reconciliation_results table
         if session_factory is not None:
             db = session_factory()
@@ -413,7 +438,9 @@ def _build_production_deps(
                             status="UNMATCHED" if category == "RECONCILIATION" else "VARIANCE_DETECTED",
                             result_status="UNMATCHED" if category == "RECONCILIATION" else "VARIANCE_DETECTED",
                             match_method="DETERMINISTIC_RULES",
-                            details_json=normalize_json_safe(meta),
+                            details_json=normalize_json_safe(
+                                {**meta, **({"lineage": item["lineage"]} if item.get("lineage") else {})}
+                            ),
                         )
                         db.add(recon_res)
                         db.flush()

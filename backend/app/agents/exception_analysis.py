@@ -119,6 +119,8 @@ class ExceptionAnalysisAgent:
             result["exception_id"] = norm_exception["id"]
         elif "exception_id" in norm_exception:
             result["exception_id"] = norm_exception["exception_id"]
+        if "lineage" in norm_exception:
+            result["lineage"] = norm_exception["lineage"]
         return result
 
     @staticmethod
@@ -310,5 +312,7 @@ class ExceptionAnalysisAgent:
             result["exception_id"] = norm_exception["id"]
         elif "exception_id" in norm_exception:
             result["exception_id"] = norm_exception["exception_id"]
+        if "lineage" in norm_exception:
+            result["lineage"] = norm_exception["lineage"]
 
         return result

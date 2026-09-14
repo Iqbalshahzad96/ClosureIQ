@@ -6,6 +6,7 @@ import ExceptionsPage from './pages/ExceptionsPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import ObservabilityPage from './pages/ObservabilityPage';
 import FinancialUploadPage from './pages/FinancialUploadPage';
+import PoliciesPage from './pages/PoliciesPage';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -22,6 +23,8 @@ export default function App() {
         return <ExceptionsPage />;
       case 'approvals':
         return <ApprovalsPage />;
+      case 'policies':
+        return <PoliciesPage />;
       case 'observability':
         return <ObservabilityPage />;
       default:

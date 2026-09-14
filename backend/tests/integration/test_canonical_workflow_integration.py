@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import MemorySaver
@@ -394,3 +395,187 @@ def test_canonical_ap_invoice_workflow(client, db_session_factory):
     assert data["exceptions"][0]["category"] == "AP_REVIEW"
     assert data["exceptions"][0]["amount_variance"] == 2320.00
     assert "Duplicate invoice number" in data["exceptions"][0]["description"]
+
+
+# ===========================================================================
+# 5. Lineage Preservation Across Canonical DB -> MCP -> Engine -> Agents
+# ===========================================================================
+
+def test_canonical_workflow_lineage_preservation_across_agents(client, db_session_factory):
+    """Lineage from canonical SourceFile and ImportBatch is retained in exceptions and agent findings."""
+    from app.database.models import ImportBatch, SourceFile, SourceSystem, JournalEntry, JournalLine, Account
+
+    session = db_session_factory()
+    try:
+        ss = SourceSystem(
+            id="ss_lineage_test",
+            organization_id="default_org",
+            adapter_key="generic_gl",
+            source_type="GL",
+            display_name="Enterprise GL System",
+            is_active=True,
+        )
+        session.add(ss)
+        session.flush()
+
+        batch = ImportBatch(
+            id="batch_lineage_test",
+            source_system_id=ss.id,
+            organization_id="default_org",
+            status="COMPLETED",
+        )
+        session.add(batch)
+        session.flush()
+
+        source_file = SourceFile(
+            id="sf_lineage_test",
+            import_batch_id=batch.id,
+            original_filename="GL_Transactions_2026_01.xlsx",
+            relative_raw_path="uploads/GL_Transactions_2026_01.xlsx",
+            sha256="abc123sha256hash",
+            byte_size=1024,
+            parse_status="PARSED",
+        )
+        session.add(source_file)
+        session.flush()
+
+        account = Account(
+            id="acc_lineage_test",
+            account_code="1020",
+            account_name="Cash Operating Account",
+            normalized_name="cash operating account",
+            account_type="ASSET",
+            currency_code="KES",
+        )
+        session.add(account)
+        session.flush()
+
+        entry = JournalEntry(
+            id="je_lineage_test",
+            organization_id="default_org",
+            import_batch_id=batch.id,
+            source_file_id=source_file.id,
+            reference="WIRE-UNMATCHED-99",
+            description="Large Vendor Wire",
+            currency_code="KES",
+            fiscal_period="2026-01",
+            status="POSTED",
+        )
+        session.add(entry)
+        session.flush()
+
+        line = JournalLine(
+            id="jl_lineage_test",
+            journal_entry_id=entry.id,
+            account_id=account.id,
+            debit_amount=Decimal("45000.00"),
+            credit_amount=Decimal("0.00"),
+            source_row_identifier="Row 42",
+            description="Large Vendor Wire",
+        )
+        session.add(line)
+        session.commit()
+    finally:
+        session.close()
+
+    resp = client.post(
+        "/api/v1/reconciliation/run",
+        json={
+            "workflow_type": "reconciliation",
+            "account_code": "1020",
+            "period": "2026-01",
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "hitl_pending"
+    assert len(data["exceptions"]) == 1
+
+    exc = data["exceptions"][0]
+    assert exc["id"].startswith("exc_rec_gl_")
+    assert "lineage" in exc
+    lineage = exc["lineage"]
+    assert lineage["found"] is True
+    assert lineage["source_row_identifier"] == "Row 42"
+    assert lineage["source_file"]["original_filename"] == "GL_Transactions_2026_01.xlsx"
+    assert lineage["source_system"]["display_name"] == "Enterprise GL System"
+
+    # Agent 1 findings retain lineage
+    assert len(data["agent_1_review"]["findings"]) == 1
+    a1_finding = data["agent_1_review"]["findings"][0]
+    assert a1_finding["lineage"] == lineage
+
+    # Agent 2 analyses retain lineage
+    assert len(data["agent_2_analyses"]) == 1
+    a2_analysis = data["agent_2_analyses"][0]
+    assert a2_analysis["lineage"] == lineage
+
+
+# ===========================================================================
+# 6. HITL Approval / Rejection Lifecycle & Resumption
+# ===========================================================================
+
+def test_canonical_hitl_approval_and_rejection_lifecycle(client, db_session_factory):
+    """Workflow pauses at HITL gate with canonical exceptions, persists state, and resumes on human decision."""
+    session = db_session_factory()
+    try:
+        financial_record(
+            session,
+            id="gl_hitl_1",
+            source="GL",
+            account_code="1030",
+            amount=9900.00,
+            reference="HITL-TEST-REF",
+            transaction_date=datetime(2026, 1, 25),
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    # 1. Trigger workflow -> pauses at hitl_gate
+    resp = client.post(
+        "/api/v1/reconciliation/run",
+        json={
+            "workflow_type": "reconciliation",
+            "account_code": "1030",
+            "period": "2026-01",
+        },
+    )
+    assert resp.status_code == 200
+    run_data = resp.json()
+    run_id = run_data["run_id"]
+    assert run_data["status"] == "hitl_pending"
+
+    # 2. Check pending approvals list
+    pending_resp = client.get("/api/v1/approvals/pending")
+    assert pending_resp.status_code == 200
+    pending_runs = pending_resp.json()
+    assert any(r["run_id"] == run_id for r in pending_runs)
+
+    # 3. Submit human approval decision
+    resume_resp = client.post(
+        f"/api/v1/approvals/{run_id}/decision",
+        json={
+            "decision": "approved",
+            "reviewer": "Financial Controller",
+            "comments": "Variance confirmed with vendor, posting approved.",
+        },
+    )
+    assert resume_resp.status_code == 200
+    resumed = resume_resp.json()
+    assert resumed["run_id"] == run_id
+    assert resumed["status"] == "approved"
+    assert resumed["decision"] == "approved"
+    assert resumed["reviewer"] == "Financial Controller"
+
+    # 4. Subsequent resume must be rejected with 409 Conflict
+    second_resume = client.post(
+        f"/api/v1/approvals/{run_id}/decision",
+        json={
+            "decision": "rejected",
+            "reviewer": "Another Reviewer",
+        },
+    )
+    assert second_resume.status_code == 409
+

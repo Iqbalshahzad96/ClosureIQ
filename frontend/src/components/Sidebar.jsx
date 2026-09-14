@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, UploadCloud, Scale, AlertTriangle, CheckSquare, LineChart, Sparkles } from 'lucide-react';
+import { LayoutDashboard, UploadCloud, Scale, AlertTriangle, CheckSquare, LineChart, Sparkles, BookOpen } from 'lucide-react';
 
 export default function Sidebar({ activeTab, setActiveTab }) {
   const menuItems = [
@@ -8,6 +8,7 @@ export default function Sidebar({ activeTab, setActiveTab }) {
     { id: 'reconciliation', label: 'Reconciliation', icon: Scale },
     { id: 'exceptions', label: 'Exceptions', icon: AlertTriangle },
     { id: 'approvals', label: 'Approvals (HITL)', icon: CheckSquare },
+    { id: 'policies', label: 'Policies & SOPs', icon: BookOpen },
     { id: 'observability', label: 'Observability', icon: LineChart },
   ];
 

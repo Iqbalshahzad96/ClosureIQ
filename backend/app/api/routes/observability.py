@@ -66,6 +66,7 @@ async def list_runs(
 
 
 @router.get("/runs/{run_id}", response_model=Dict[str, Any])
+@router.get("/runs/{run_id}/trace", response_model=Dict[str, Any])
 async def get_run_trace(
     run_id: str,
     workflow_service: WorkflowService = Depends(get_workflow_service),
