@@ -982,3 +982,58 @@ def test_agent_2_missing_evidence_indices_raises_agent_error():
     with pytest.raises(ExceptionAnalysisAgentError, match="schema") as error:
         run(agent.run_agent_2(exception(), sample_agent_1_review(), [sample_evidence()]))
     assert error.value.__cause__ is not None
+
+
+def test_agent_1_preserves_lineage():
+    """Agent 1 findings must preserve lineage attached to exceptions."""
+    invoke, calls = fake_model()
+    agent = FinancialReviewAgent(model_callable=invoke)
+    lineage_data = {
+        "record_type": "JOURNAL_LINE",
+        "record_id": "jl_001",
+        "source_row_identifier": "Row 12",
+        "source_file": {"original_filename": "GL_Jan2026.xlsx"},
+    }
+    exc = {
+        "id": "exc_001",
+        "severity": "HIGH",
+        "description": "Unmatched GL line",
+        "lineage": lineage_data,
+    }
+    result = run(agent.run_agent_1([exc], {"reconciled": False}))
+    assert result["status"] == "COMPLETED"
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["lineage"] == lineage_data
+
+
+def test_agent_2_preserves_lineage_completed_and_manual_review():
+    """Agent 2 analyses must preserve lineage attached to exceptions."""
+    # Case A: Completed with evidence
+    invoke, calls = fake_agent_2_model(
+        analysis="Prepaid expense amortization schedule discrepancy.",
+        root_cause="Timing difference in month-end amortization schedule.",
+        recommendation="Post adjusting entry to prepaid asset account.",
+        evidence_indices=[0],
+    )
+    agent = ExceptionAnalysisAgent(model_callable=invoke)
+    lineage_data = {
+        "record_type": "JOURNAL_LINE",
+        "record_id": "jl_001",
+        "source_row_identifier": "Row 12",
+        "source_file": {"original_filename": "GL_Jan2026.xlsx"},
+    }
+    exc = {
+        "id": "exc_001",
+        "severity": "HIGH",
+        "description": "Unmatched GL line",
+        "lineage": lineage_data,
+    }
+    result = run(agent.run_agent_2(exc, sample_agent_1_review(), [sample_evidence()]))
+    assert result["status"] == "COMPLETED"
+    assert result["lineage"] == lineage_data
+
+    # Case B: Manual review fallback without evidence
+    manual_result = run(agent.run_agent_2(exc, sample_agent_1_review(), []))
+    assert manual_result["status"] == "MANUAL_REVIEW"
+    assert manual_result["lineage"] == lineage_data
+

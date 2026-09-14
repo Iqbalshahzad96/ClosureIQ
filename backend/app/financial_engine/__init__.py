@@ -8,12 +8,16 @@ without delegating financial math to LLMs.
 from app.financial_engine.reconciliation import ReconciliationEngine
 from app.financial_engine.accrual import AccrualEngine
 from app.financial_engine.depreciation import DepreciationEngine
+from app.financial_engine.ap import APEngine
 from app.financial_engine.exceptions import ExceptionGenerator, FinancialException
+from app.financial_engine.trial_balance import TrialBalanceEngine
 
 __all__ = [
     "ReconciliationEngine",
     "AccrualEngine",
     "DepreciationEngine",
+    "APEngine",
     "ExceptionGenerator",
     "FinancialException",
+    "TrialBalanceEngine",
 ]

@@ -343,6 +343,8 @@ class FinancialReviewAgent:
             }
             if "id" in original:
                 result["exception_id"] = original["id"]
+            if "lineage" in original:
+                result["lineage"] = original["lineage"]
             enriched.append(result)
         return enriched
 

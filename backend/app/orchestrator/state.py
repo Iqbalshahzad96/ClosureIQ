@@ -21,7 +21,14 @@ class OrchestratorState(BaseModel):
         default_factory=lambda: f"run_{uuid.uuid4().hex[:12]}",
         description="Unique run identifier, doubles as LangGraph thread_id.",
     )
-    workflow_type: Literal["reconciliation", "accrual", "depreciation"] = Field(
+    workflow_type: Literal[
+        "reconciliation",
+        "accrual",
+        "depreciation",
+        "ap_review",
+        "ap",
+        "ap_invoices",
+    ] = Field(
         default="reconciliation",
         description="Financial workflow to execute.",
     )

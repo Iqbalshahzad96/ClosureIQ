@@ -361,15 +361,26 @@ def test_exception_result_is_json_serializable(seeded_tools):
 
 
 # ---------------------------------------------------------------------------
-# get_account_balance — blocked
+# get_account_balance — now implemented via canonical TrialBalanceRecord
 # ---------------------------------------------------------------------------
 
 
-def test_get_account_balance_raises_not_implemented(tools):
-    """get_account_balance must raise NotImplementedError until the
-    period-to-date-range contract is resolved."""
-    with pytest.raises(NotImplementedError, match="period"):
-        asyncio.run(tools.get_account_balance("1010", "2026-Q1"))
+def test_get_account_balance_from_trial_balance(seeded_tools):
+    """get_account_balance returns balance from TrialBalanceRecord when available."""
+    from tests.canonical_fixtures import trial_balance_record
+    with seeded_tools._session_factory.begin() as session:
+        trial_balance_record(session)
+    result = asyncio.run(seeded_tools.get_account_balance("1010", "2026-01"))
+    assert result["found"] is True
+    assert result["closing_balance"] == 6000.0
+    assert result["source"] == "TRIAL_BALANCE_RECORD"
+    assert result["exact_amounts"]["closing_balance"] == "6000.0000"
+
+
+def test_get_account_balance_not_found(tools):
+    """get_account_balance returns found=False for unknown accounts."""
+    result = asyncio.run(tools.get_account_balance("NONEXISTENT", "2026-Q1"))
+    assert result["found"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -377,9 +388,8 @@ def test_get_account_balance_raises_not_implemented(tools):
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_server_registers_exactly_three_tools():
-    """The MCPServer instance exposes exactly the 3 implemented tools.
-    get_account_balance must NOT be registered.
+def test_mcp_server_registers_all_canonical_tools():
+    """The MCPServer instance exposes all canonical financial data access tools.
     Uses the public ``await mcp.list_tools()`` API from MCP SDK v2.1.1."""
     from app.mcp.server import mcp
 
@@ -388,7 +398,21 @@ def test_mcp_server_registers_exactly_three_tools():
         return {t.name for t in tools}
 
     registered = asyncio.run(_list())
-    expected = {"query_gl_transactions", "query_bank_transactions", "get_exception_details"}
+    expected = {
+        "query_gl_transactions",
+        "query_bank_transactions",
+        "get_exception_details",
+        "get_account_balance",
+        "query_chart_of_accounts",
+        "query_trial_balance",
+        "query_fixed_assets",
+        "query_ap_invoices",
+        "query_exceptions",
+        "query_journal_entries",
+        "query_accounting_periods",
+        "query_import_batches",
+        "get_record_lineage",
+    }
     assert registered == expected, (
         f"Expected tools {expected}, but got {registered}"
     )

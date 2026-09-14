@@ -5,8 +5,9 @@ RAG and Policy Ingestion API Routes
 from __future__ import annotations
 
 import os
+import tempfile
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 
 from app.rag.vectorstore import VectorStoreManager
@@ -19,6 +20,26 @@ router = APIRouter(prefix="/rag", tags=["RAG & Policies"])
 _vectorstore_manager = VectorStoreManager()
 _ingester = PolicyDocumentIngester(vectorstore_manager=_vectorstore_manager)
 _retriever = PolicyRetriever(vectorstore_manager=_vectorstore_manager)
+
+
+def get_vectorstore_manager() -> VectorStoreManager:
+    return _vectorstore_manager
+
+
+def get_ingester(
+    vectorstore_manager: VectorStoreManager = Depends(get_vectorstore_manager),
+) -> PolicyDocumentIngester:
+    if vectorstore_manager is _vectorstore_manager:
+        return _ingester
+    return PolicyDocumentIngester(vectorstore_manager=vectorstore_manager)
+
+
+def get_retriever(
+    vectorstore_manager: VectorStoreManager = Depends(get_vectorstore_manager),
+) -> PolicyRetriever:
+    if vectorstore_manager is _vectorstore_manager:
+        return _retriever
+    return PolicyRetriever(vectorstore_manager=vectorstore_manager)
 
 
 # ---------------------------------------------------------------------------
@@ -57,14 +78,17 @@ class IngestDirectoryRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/query", response_model=RAGQueryResponse)
-async def query_policies(payload: RAGQueryRequest) -> RAGQueryResponse:
+async def query_policies(
+    payload: RAGQueryRequest,
+    retriever: PolicyRetriever = Depends(get_retriever),
+) -> RAGQueryResponse:
     """Retrieve relevant accounting policy context for a query."""
-    results = await _retriever.retrieve_policy_context(
+    results = await retriever.retrieve_policy_context(
         query=payload.query,
         top_k=payload.top_k,
         category=payload.category,
     )
-    formatted = _retriever.format_context_for_prompt(results)
+    formatted = retriever.format_context_for_prompt(results)
     return RAGQueryResponse(
         query=payload.query,
         count=len(results),
@@ -74,9 +98,12 @@ async def query_policies(payload: RAGQueryRequest) -> RAGQueryResponse:
 
 
 @router.post("/ingest/text")
-async def ingest_policy_text(payload: IngestTextRequest) -> Dict[str, Any]:
+async def ingest_policy_text(
+    payload: IngestTextRequest,
+    ingester: PolicyDocumentIngester = Depends(get_ingester),
+) -> Dict[str, Any]:
     """Ingest a policy document from raw text/markdown with zero-duplicate guarantee."""
-    res = _ingester.ingest_text(
+    res = ingester.ingest_text(
         text=payload.text,
         doc_id=payload.doc_id,
         filename=payload.filename or f"{payload.doc_id}.md",
@@ -90,8 +117,65 @@ async def ingest_policy_text(payload: IngestTextRequest) -> Dict[str, Any]:
     return res
 
 
+@router.post("/ingest/file")
+@router.post("/upload")
+async def upload_policy_file(
+    file: UploadFile = File(...),
+    category: Optional[str] = Form(default=None),
+    policy_id: Optional[str] = Form(default=None),
+    ingester: PolicyDocumentIngester = Depends(get_ingester),
+) -> Dict[str, Any]:
+    """Ingest an uploaded policy document (.md, .txt, .pdf, .docx) into ChromaDB."""
+    filename = file.filename or "policy.md"
+    content_bytes = await file.read()
+    if not content_bytes or len(content_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded policy file is empty.")
+
+    ext = os.path.splitext(filename)[1].lower()
+    doc_id = policy_id or os.path.splitext(filename)[0].lower().replace(" ", "_")
+    meta_override: Dict[str, Any] = {}
+    if category:
+        meta_override["category"] = category
+    if policy_id:
+        meta_override["policy_id"] = policy_id
+
+    if ext in {".md", ".txt", ".markdown", ".csv", ".json"}:
+        text = content_bytes.decode("utf-8", errors="replace")
+    elif ext in {".pdf", ".docx", ".doc"}:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(content_bytes)
+            tmp_path = tmp.name
+        try:
+            text = ingester.extract_text_from_file(tmp_path)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+    else:
+        text = content_bytes.decode("utf-8", errors="replace")
+
+    res = ingester.ingest_text(
+        text=text,
+        doc_id=doc_id,
+        filename=filename,
+        metadata_override=meta_override,
+    )
+    if res.get("status") == "FAILED":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=res.get("message", "Policy ingestion failed."),
+        )
+    return res
+
+
 @router.post("/ingest/directory")
-async def ingest_policy_directory(payload: Optional[IngestDirectoryRequest] = None) -> Dict[str, Any]:
+async def ingest_policy_directory(
+    payload: Optional[IngestDirectoryRequest] = None,
+    ingester: PolicyDocumentIngester = Depends(get_ingester),
+    vectorstore_manager: VectorStoreManager = Depends(get_vectorstore_manager),
+) -> Dict[str, Any]:
     """Ingest all policy files from the server's policy directory."""
     dir_path = payload.directory_path if payload and payload.directory_path else None
     if not dir_path:
@@ -112,20 +196,22 @@ async def ingest_policy_directory(payload: Optional[IngestDirectoryRequest] = No
             detail=f"Policy directory not found: {dir_path}",
         )
 
-    results = _ingester.ingest_directory(dir_path)
+    results = ingester.ingest_directory(dir_path)
     return {
         "directory_path": dir_path,
         "ingested_files_count": len(results),
-        "total_chunks_in_store": _vectorstore_manager.count(),
+        "total_chunks_in_store": vectorstore_manager.count(),
         "results": results,
     }
 
 
 @router.get("/documents")
-async def list_documents() -> Dict[str, Any]:
+async def list_documents(
+    vectorstore_manager: VectorStoreManager = Depends(get_vectorstore_manager),
+) -> Dict[str, Any]:
     """List all ingested policy documents and total chunks in ChromaDB."""
-    docs = _vectorstore_manager.list_documents()
-    total_chunks = _vectorstore_manager.count()
+    docs = vectorstore_manager.list_documents()
+    total_chunks = vectorstore_manager.count()
     return {
         "total_documents": len(docs),
         "total_chunks": total_chunks,
@@ -134,9 +220,12 @@ async def list_documents() -> Dict[str, Any]:
 
 
 @router.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str) -> Dict[str, Any]:
+async def delete_document(
+    doc_id: str,
+    ingester: PolicyDocumentIngester = Depends(get_ingester),
+) -> Dict[str, Any]:
     """Delete a policy document and its chunks from ChromaDB."""
-    deleted_count = _ingester.delete_document(doc_id)
+    deleted_count = ingester.delete_document(doc_id)
     if deleted_count == 0:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -147,3 +236,4 @@ async def delete_document(doc_id: str) -> Dict[str, Any]:
         "deleted_chunks": deleted_count,
         "status": "DELETED",
     }
+

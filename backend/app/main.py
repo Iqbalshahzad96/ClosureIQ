@@ -9,6 +9,7 @@ from app.config import settings
 from app.api.routes import api_router
 from app.observability.logger import setup_logging
 from app.services.workflow_service import WorkflowService
+from app.database.database import initialize_database
 
 # Initialize structured logging
 logger = setup_logging()
@@ -22,6 +23,7 @@ async def lifespan(app: FastAPI):
     ClosureIQ uses an in-memory MemorySaver checkpointer for the MVP,
     requiring single-process, single-worker execution (uvicorn --workers 1).
     """
+    initialize_database()
     app.state.workflow_service = WorkflowService()
     logger.info("Application-lifetime WorkflowService initialized on app.state.")
     yield

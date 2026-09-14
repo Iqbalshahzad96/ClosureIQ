@@ -175,6 +175,131 @@ class ExceptionGenerator:
 
         return exceptions
 
+    def from_ap(
+        self,
+        ap_output: Dict[str, Any],
+        period: str = "CURRENT",
+    ) -> List[FinancialException]:
+        """Convert AP duplicates, calculation breaks, and payment discrepancies into exceptions."""
+        exceptions: List[FinancialException] = []
+
+        # Duplicate invoices
+        for dup in ap_output.get("duplicates", []):
+            amt = float(dup.get("variance_amount", dup.get("total_amount", 0.0)))
+            dtype = dup.get("type", "DUPLICATE_INVOICE")
+            reason = dup.get("reason", "Duplicate invoice detected.")
+            exceptions.append(
+                FinancialException(
+                    id=f"exc_ap_dup_{uuid.uuid4().hex[:8]}",
+                    period=period,
+                    category="AP_REVIEW",
+                    severity=self.determine_severity(amt),
+                    amount_variance=round(amt, 2),
+                    description=f"[{dtype}] {reason}",
+                    metadata=dup,
+                )
+            )
+
+        # Calculation errors (subtotal + tax != total)
+        for calc in ap_output.get("calculation_errors", []):
+            diff = float(calc.get("variance_amount", 0.0))
+            reason = calc.get("reason", "AP calculation mismatch.")
+            exceptions.append(
+                FinancialException(
+                    id=f"exc_ap_calc_{uuid.uuid4().hex[:8]}",
+                    period=period,
+                    category="AP_REVIEW",
+                    severity=self.determine_severity(diff),
+                    amount_variance=round(diff, 2),
+                    description=f"[CALCULATION_MISMATCH] {reason}",
+                    metadata=calc,
+                )
+            )
+
+        # Payment & balance discrepancies
+        for pmt in ap_output.get("payment_discrepancies", []):
+            amt = float(pmt.get("variance_amount", 0.0))
+            ptype = pmt.get("type", "PAYMENT_DISCREPANCY")
+            reason = pmt.get("reason", "AP payment balance discrepancy.")
+            exceptions.append(
+                FinancialException(
+                    id=f"exc_ap_pmt_{uuid.uuid4().hex[:8]}",
+                    period=period,
+                    category="AP_REVIEW",
+                    severity=self.determine_severity(amt),
+                    amount_variance=round(amt, 2),
+                    description=f"[{ptype}] {reason}",
+                    metadata=pmt,
+                )
+            )
+
+        # Overdue invoices
+        for ovd in ap_output.get("overdue_invoices", []):
+            amt = float(ovd.get("outstanding_amount", 0.0))
+            reason = ovd.get("reason", "Overdue AP obligation.")
+            exceptions.append(
+                FinancialException(
+                    id=f"exc_ap_ovd_{uuid.uuid4().hex[:8]}",
+                    period=period,
+                    category="AP_REVIEW",
+                    severity=self.determine_severity(amt),
+                    amount_variance=round(amt, 2),
+                    description=f"[OVERDUE_INVOICE] {reason}",
+                    metadata=ovd,
+                )
+            )
+
+        return exceptions
+
+    def from_trial_balance(
+        self,
+        tb_output: Dict[str, Any],
+        period: str = "CURRENT",
+    ) -> List[FinancialException]:
+        """Convert trial balance continuity errors and imbalance into exceptions."""
+        exceptions: List[FinancialException] = []
+
+        # Debit/credit imbalance
+        if not tb_output.get("is_balanced", True):
+            diff = float(tb_output.get("debit_credit_difference", 0.0))
+            exceptions.append(
+                FinancialException(
+                    id=f"exc_tb_bal_{uuid.uuid4().hex[:8]}",
+                    period=period,
+                    category="TRIAL_BALANCE",
+                    severity=self.determine_severity(diff),
+                    amount_variance=round(diff, 2),
+                    description=(
+                        f"Trial balance debit/credit imbalance: "
+                        f"total debits={tb_output.get('total_debits', 0.0)}, "
+                        f"total credits={tb_output.get('total_credits', 0.0)}, "
+                        f"difference={diff}."
+                    ),
+                    metadata={"total_debits": tb_output.get("total_debits"),
+                              "total_credits": tb_output.get("total_credits"),
+                              "exact_variance": tb_output.get("debit_credit_difference"),
+                              "record_ids": tb_output.get("record_ids", [])},
+                )
+            )
+
+        # Row-level continuity errors
+        for err in tb_output.get("continuity_errors", []):
+            variance = float(err.get("variance", 0.0))
+            reason = err.get("reason", "Continuity equation break.")
+            exceptions.append(
+                FinancialException(
+                    id=f"exc_tb_cont_{uuid.uuid4().hex[:8]}",
+                    period=period,
+                    category="TRIAL_BALANCE",
+                    severity=self.determine_severity(variance),
+                    amount_variance=round(variance, 2),
+                    description=f"[CONTINUITY_BREAK] {reason}",
+                    metadata=err,
+                )
+            )
+
+        return exceptions
+
     def generate_exceptions(
         self,
         engine_output: Dict[str, Any],
@@ -183,10 +308,14 @@ class ExceptionGenerator:
     ) -> List[FinancialException]:
         """Dispatch and generate exceptions from any financial engine output dictionary."""
         # Auto-detect category or use provided category
-        if category == "RECONCILIATION" or ("unmatched_gl" in engine_output or "unmatched_bank" in engine_output):
+        if category in ("RECONCILIATION", "BANK_RECONCILIATION") or ("unmatched_gl" in engine_output or "unmatched_bank" in engine_output):
             return self.from_reconciliation(engine_output, period=period)
         elif category == "ACCRUAL" or "anomalies" in engine_output:
             return self.from_accruals(engine_output, period=period)
         elif category == "DEPRECIATION" or "discrepancies" in engine_output:
             return self.from_depreciation(engine_output, period=period)
+        elif category in ("AP_REVIEW", "AP", "DUPLICATE") or ("duplicates" in engine_output or "calculation_errors" in engine_output or "payment_discrepancies" in engine_output):
+            return self.from_ap(engine_output, period=period)
+        elif category == "TRIAL_BALANCE" or "continuity_errors" in engine_output:
+            return self.from_trial_balance(engine_output, period=period)
         return []

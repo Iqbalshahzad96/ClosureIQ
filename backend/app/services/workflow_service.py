@@ -28,6 +28,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 from fastapi import Request
@@ -40,8 +41,9 @@ from sqlalchemy.orm import Session
 from app.agents.exception_analysis import ExceptionAnalysisAgent
 from app.agents.financial_review import FinancialReviewAgent
 from app.database.database import SessionLocal
-from app.database.models import AuditTrailRecord, ExceptionRecord
+from app.database.models import AuditTrailRecord, ExceptionRecord, ReconciliationResult, ReconciliationRun
 from app.financial_engine.accrual import AccrualEngine
+from app.financial_engine.ap import APEngine
 from app.financial_engine.depreciation import DepreciationEngine
 from app.financial_engine.exceptions import ExceptionGenerator
 from app.financial_engine.reconciliation import ReconciliationEngine
@@ -60,6 +62,7 @@ RAG_CATEGORY_MAP: Dict[str, str] = {
     "RECONCILIATION": "BANK_RECONCILIATION",
     "ACCRUAL": "ACCRUAL",
     "DEPRECIATION": "DEPRECIATION",
+    "AP_REVIEW": "ACCRUAL",
 }
 
 
@@ -118,62 +121,73 @@ def _build_production_deps(
     reconciliation_engine: ReconciliationEngine,
     accrual_engine: AccrualEngine,
     depreciation_engine: DepreciationEngine,
-    exception_generator: ExceptionGenerator,
-    financial_review_agent: FinancialReviewAgent,
-    policy_retriever: PolicyRetriever,
-    exception_analysis_agent: ExceptionAnalysisAgent,
+    ap_engine: Optional[APEngine] = None,
+    exception_generator: Optional[ExceptionGenerator] = None,
+    financial_review_agent: Optional[FinancialReviewAgent] = None,
+    policy_retriever: Optional[PolicyRetriever] = None,
+    exception_analysis_agent: Optional[ExceptionAnalysisAgent] = None,
 ) -> WorkflowDeps:
     """Construct real production WorkflowDeps binding existing components."""
+    _ap = ap_engine or APEngine()
+    _exc = exception_generator or ExceptionGenerator()
+    _a1 = financial_review_agent or FinancialReviewAgent()
+    _rag = policy_retriever or PolicyRetriever()
+    _a2 = exception_analysis_agent or ExceptionAnalysisAgent()
 
     async def fetch_data(workflow_type: str, input_params: Dict[str, Any]) -> Dict[str, Any]:
         """Fetch input data and record only MCP calls that actually execute."""
+        run_calls = _current_mcp_calls.get()
+        local_calls: List[Dict[str, Any]] = []
+
+        async def invoke(
+            tool_name: str,
+            operation: Callable[..., Awaitable[Any]],
+            **kwargs: Any,
+        ) -> Any:
+            started = time.monotonic()
+            try:
+                records = await operation(**kwargs)
+            except Exception as exc:
+                event = {
+                    "node": "fetch_data",
+                    "workflow_type": workflow_type,
+                    "tool": tool_name,
+                    "status": "error",
+                    "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "parameters": kwargs,
+                    "records_fetched": 0,
+                    "error": str(exc),
+                }
+                local_calls.append(event)
+                if run_calls is not None:
+                    run_calls.append(event)
+                raise
+            event = {
+                "node": "fetch_data",
+                "workflow_type": workflow_type,
+                "tool": tool_name,
+                "status": "success",
+                "latency_ms": round((time.monotonic() - started) * 1000, 2),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "parameters": kwargs,
+                "records_fetched": len(records) if isinstance(records, (list, tuple)) else (1 if records else 0),
+                "error": None,
+            }
+            local_calls.append(event)
+            if run_calls is not None:
+                run_calls.append(event)
+            return records
+
         if workflow_type == "reconciliation":
             account_code = input_params.get("account_code")
             if not account_code or not str(account_code).strip():
                 raise ValueError("account_code is required for reconciliation workflow")
             account_code = str(account_code)
             limit = int(input_params.get("limit", 50))
-            run_calls = _current_mcp_calls.get()
-            local_calls: List[Dict[str, Any]] = []
 
-            async def invoke(tool_name: str, operation: Callable[..., Awaitable[List[Dict[str, Any]]]]) -> List[Dict[str, Any]]:
-                started = time.monotonic()
-                try:
-                    records = await operation(account_code=account_code, limit=limit)
-                except Exception as exc:
-                    event = {
-                        "node": "fetch_data",
-                        "workflow_type": workflow_type,
-                        "tool": tool_name,
-                        "status": "error",
-                        "latency_ms": round((time.monotonic() - started) * 1000, 2),
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "parameters": {"account_code": account_code, "limit": limit},
-                        "records_fetched": 0,
-                        "error": str(exc),
-                    }
-                    local_calls.append(event)
-                    if run_calls is not None:
-                        run_calls.append(event)
-                    raise
-                event = {
-                    "node": "fetch_data",
-                    "workflow_type": workflow_type,
-                    "tool": tool_name,
-                    "status": "success",
-                    "latency_ms": round((time.monotonic() - started) * 1000, 2),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "parameters": {"account_code": account_code, "limit": limit},
-                    "records_fetched": len(records),
-                    "error": None,
-                }
-                local_calls.append(event)
-                if run_calls is not None:
-                    run_calls.append(event)
-                return records
-
-            gl_records = await invoke("query_gl_transactions", mcp_tools.query_gl_transactions)
-            bank_records = await invoke("query_bank_transactions", mcp_tools.query_bank_transactions)
+            gl_records = await invoke("query_gl_transactions", mcp_tools.query_gl_transactions, account_code=account_code, limit=limit)
+            bank_records = await invoke("query_bank_transactions", mcp_tools.query_bank_transactions, account_code=account_code, limit=limit)
             return {
                 "account_code": account_code,
                 "gl_transactions": gl_records,
@@ -184,27 +198,78 @@ def _build_production_deps(
         if workflow_type == "accrual":
             accrual_entries = input_params.get("accrual_entries")
             historical_baseline = input_params.get("historical_baseline")
+            account_code = input_params.get("account_code")
+            limit = int(input_params.get("limit", 50))
+
+            if accrual_entries is None and account_code:
+                gl_records = await invoke("query_gl_transactions", mcp_tools.query_gl_transactions, account_code=str(account_code), limit=limit)
+                accrual_entries = [
+                    {
+                        "id": r.get("id"),
+                        "account_code": r.get("account_code"),
+                        "vendor": r.get("description") or r.get("reference"),
+                        "name": r.get("description") or r.get("reference"),
+                        "amount": abs(float(r.get("amount", 0.0))),
+                        "description": r.get("description"),
+                        "period": input_params.get("period", "CURRENT"),
+                    }
+                    for r in gl_records
+                ]
+
             if accrual_entries is None:
                 raise ValueError("accrual_entries is required for accrual workflow")
             if historical_baseline is None:
-                raise ValueError("historical_baseline is required for accrual workflow")
+                historical_baseline = {}
+
             return {
                 "accrual_entries": accrual_entries,
                 "historical_baseline": historical_baseline,
-                "mcp_calls": [],
+                "mcp_calls": local_calls,
             }
 
         if workflow_type == "depreciation":
             asset_records = input_params.get("asset_records")
             period_posted_depreciation = input_params.get("period_posted_depreciation")
+            limit = int(input_params.get("limit", 50))
+
+            if asset_records is None:
+                category = input_params.get("category")
+                status_filter = input_params.get("status", "ACTIVE")
+                assets = await invoke("query_fixed_assets", mcp_tools.query_fixed_assets, category=category, status=status_filter, limit=limit)
+                asset_records = assets
+
+            if period_posted_depreciation is None:
+                period_posted_depreciation = {}
+
             if asset_records is None:
                 raise ValueError("asset_records is required for depreciation workflow")
-            if period_posted_depreciation is None:
-                raise ValueError("period_posted_depreciation is required for depreciation workflow")
+
             return {
                 "asset_records": asset_records,
                 "period_posted_depreciation": period_posted_depreciation,
-                "mcp_calls": [],
+                "mcp_calls": local_calls,
+            }
+
+        if workflow_type in ("ap_review", "ap", "ap_invoices"):
+            invoices = input_params.get("invoices")
+            limit = int(input_params.get("limit", 50))
+
+            if invoices is None:
+                vendor_name = input_params.get("vendor_name")
+                status_filter = input_params.get("status")
+                fetched = await invoke("query_ap_invoices", mcp_tools.query_ap_invoices, vendor_name=vendor_name, status=status_filter, limit=limit)
+                invoices = fetched
+
+            if invoices is None:
+                invoices = []
+
+            period = input_params.get("period")
+            as_of_date = input_params.get("as_of_date") or (None if period in ("CURRENT", None, "") else period)
+
+            return {
+                "invoices": invoices,
+                "as_of_date": as_of_date,
+                "mcp_calls": local_calls,
             }
 
         raise ValueError(f"Unsupported workflow_type: {workflow_type}")
@@ -232,6 +297,11 @@ def _build_production_deps(
                 period_posted_depreciation=posted,
             )
 
+        elif workflow_type in ("ap_review", "ap", "ap_invoices"):
+            invoices = financial_data.get("invoices", [])
+            as_of = financial_data.get("as_of_date")
+            return _ap.validate_ap_invoices(invoices=invoices, as_of_date=as_of)
+
         else:
             raise ValueError(f"Unsupported workflow_type: {workflow_type}")
 
@@ -240,16 +310,19 @@ def _build_production_deps(
         validation_results: Dict[str, Any],
         period: str = "CURRENT",
     ) -> List[Dict[str, Any]]:
-        """Generate structured exceptions and persist them to exception_records."""
+        """Generate structured exceptions and persist them to exception_records and reconciliation_results."""
         cat_map = {
             "reconciliation": "RECONCILIATION",
             "accrual": "ACCRUAL",
             "depreciation": "DEPRECIATION",
+            "ap_review": "AP_REVIEW",
+            "ap": "AP_REVIEW",
+            "ap_invoices": "AP_REVIEW",
         }
         category = cat_map.get(workflow_type, "GENERAL")
         effective_period = period or "CURRENT"
 
-        raw_exceptions = exception_generator.generate_exceptions(
+        raw_exceptions = _exc.generate_exceptions(
             engine_output=validation_results,
             period=effective_period,
             category=category,
@@ -266,15 +339,112 @@ def _build_production_deps(
             item["period"] = effective_period
             serialized.append(item)
 
-        # Persist exceptions idempotently to existing exception_records table
+        # Enrich exceptions with canonical record lineage when available
+        if mcp_tools is not None:
+            for item in serialized:
+                meta = item.get("metadata") or {}
+                lineage_info = None
+                try:
+                    if meta.get("source") == "GL" and meta.get("record", {}).get("id"):
+                        lineage_info = await mcp_tools.get_record_lineage("JOURNAL_LINE", meta["record"]["id"])
+                    elif meta.get("source") == "BANK" and meta.get("record", {}).get("id"):
+                        lineage_info = await mcp_tools.get_record_lineage("BANK_TRANSACTION", meta["record"]["id"])
+                    elif category == "DEPRECIATION" and meta.get("asset_id"):
+                        lineage_info = await mcp_tools.get_record_lineage("FIXED_ASSET", meta["asset_id"])
+                    elif category == "AP_REVIEW" and meta.get("invoice_id"):
+                        lineage_info = await mcp_tools.get_record_lineage("AP_INVOICE", meta["invoice_id"])
+                    elif meta.get("id"):
+                        if meta.get("source") == "GL":
+                            lineage_info = await mcp_tools.get_record_lineage("JOURNAL_LINE", meta["id"])
+                        elif meta.get("source") == "BANK":
+                            lineage_info = await mcp_tools.get_record_lineage("BANK_TRANSACTION", meta["id"])
+                except Exception as l_exc:
+                    logger.debug("Lineage lookup skipped for exception %s: %s", item.get("id"), l_exc)
+
+                if lineage_info and lineage_info.get("found"):
+                    item["lineage"] = lineage_info
+
+        # Persist exceptions idempotently to existing exception_records & reconciliation_results table
         if session_factory is not None:
             db = session_factory()
             committed = False
             try:
+                run_type_map = {
+                    "RECONCILIATION": "GL_BANK_RECONCILIATION",
+                    "ACCRUAL": "ACCRUAL_REVIEW",
+                    "DEPRECIATION": "DEPRECIATION_VALIDATION",
+                    "AP_REVIEW": "AP_REVIEW",
+                }
+                rec_run_type = run_type_map.get(category, "GL_BANK_RECONCILIATION")
+                run_record_id = f"run_{category.lower()}_{effective_period.replace('-', '_')}"
+
+                current_run = db.get(ReconciliationRun, run_record_id)
+                if current_run is None:
+                    current_run = ReconciliationRun(
+                        id=run_record_id,
+                        organization_id="default_org",
+                        run_type=rec_run_type,
+                        fiscal_period=effective_period,
+                        status="IN_PROGRESS",
+                    )
+                    db.add(current_run)
+                    db.flush()
+
                 for item in serialized:
                     exc_id = item.get("id")
                     if not exc_id:
                         continue
+                    meta = item.get("metadata") or {}
+                    
+                    # Extract entity keys from metadata
+                    gl_line_id = None
+                    bank_tx_id = None
+                    asset_id = None
+                    inv_id = None
+
+                    if meta.get("source") == "GL":
+                        gl_line_id = meta.get("record", {}).get("id")
+                    elif meta.get("source") == "BANK":
+                        bank_tx_id = meta.get("record", {}).get("id")
+                    elif category == "DEPRECIATION":
+                        asset_id = meta.get("asset_id")
+                    elif category == "AP_REVIEW":
+                        inv_id = meta.get("invoice_id")
+
+                    recon_res_id = f"res_{exc_id}"
+                    existing_res = db.get(ReconciliationResult, recon_res_id)
+                    if existing_res is None:
+                        result_type = (
+                            "BANK_RECONCILIATION" if category == "RECONCILIATION"
+                            else "ACCRUAL_REVIEW" if category == "ACCRUAL"
+                            else "DEPRECIATION_VALIDATION" if category == "DEPRECIATION"
+                            else "AP_REVIEW"
+                        )
+                        var_val = Decimal(str(item.get("amount_variance", 0.0)))
+                        exp_val = Decimal(str(meta.get("calculated_depreciation") or meta.get("expected_amount") or 0.0))
+                        act_val = Decimal(str(meta.get("posted_depreciation") or meta.get("actual_amount") or 0.0))
+                        recon_res = ReconciliationResult(
+                            id=recon_res_id,
+                            run_id=current_run.id,
+                            result_type=result_type,
+                            journal_line_id=gl_line_id,
+                            bank_transaction_id=bank_tx_id,
+                            fixed_asset_id=asset_id,
+                            ap_invoice_id=inv_id,
+                            expected_amount=exp_val,
+                            actual_amount=act_val,
+                            variance=var_val,
+                            amount_difference=var_val,
+                            status="UNMATCHED" if category == "RECONCILIATION" else "VARIANCE_DETECTED",
+                            result_status="UNMATCHED" if category == "RECONCILIATION" else "VARIANCE_DETECTED",
+                            match_method="DETERMINISTIC_RULES",
+                            details_json=normalize_json_safe(
+                                {**meta, **({"lineage": item["lineage"]} if item.get("lineage") else {})}
+                            ),
+                        )
+                        db.add(recon_res)
+                        db.flush()
+
                     existing = db.get(ExceptionRecord, exc_id)
                     if existing is None:
                         created_at_val = item.get("created_at")
@@ -292,10 +462,14 @@ def _build_production_deps(
 
                         rec = ExceptionRecord(
                             id=exc_id,
+                            reconciliation_result_id=recon_res_id,
+                            run_id=current_run.id,
+                            journal_line_id=gl_line_id,
+                            bank_transaction_id=bank_tx_id,
                             period=item.get("period") or effective_period,
                             category=item.get("category", category),
                             severity=item.get("severity", "MEDIUM"),
-                            amount_variance=float(item.get("amount_variance", 0.0)),
+                            amount_variance=Decimal(str(item.get("amount_variance", 0.0))),
                             description=str(item.get("description", "")),
                             status=item.get("status", "OPEN"),
                             created_at=dt,
@@ -319,7 +493,7 @@ def _build_production_deps(
 
     async def run_agent_1(exceptions: List[Dict[str, Any]], validation_results: Dict[str, Any]) -> Dict[str, Any]:
         """Execute Agent 1 (Financial Review Agent)."""
-        return await financial_review_agent.run_agent_1(exceptions, validation_results)
+        return await _a1.run_agent_1(exceptions, validation_results)
 
     async def retrieve_policies(exc: Dict[str, Any], agent_1_review: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Retrieve grounded accounting policy context for a single exception."""
@@ -328,7 +502,7 @@ def _build_production_deps(
         mapped_cat = RAG_CATEGORY_MAP.get(category, category) if category else None
 
         # Attempt retrieval with mapped category filter
-        evidence = await policy_retriever.retrieve_policy_context(
+        evidence = await _rag.retrieve_policy_context(
             query=query,
             top_k=3,
             category=mapped_cat,
@@ -336,7 +510,7 @@ def _build_production_deps(
 
         # Fallback to unrestricted search if category-specific filter returned no evidence
         if not evidence and mapped_cat:
-            evidence = await policy_retriever.retrieve_policy_context(
+            evidence = await _rag.retrieve_policy_context(
                 query=query,
                 top_k=3,
                 category=None,
@@ -350,7 +524,7 @@ def _build_production_deps(
         matched_evidence: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Execute Agent 2 (Exception Analysis Agent) for one exception."""
-        return await exception_analysis_agent.run_agent_2(exc, agent_1_review, matched_evidence)
+        return await _a2.run_agent_2(exc, agent_1_review, matched_evidence)
 
     async def log_event(event_type: str, details: Dict[str, Any]) -> None:
         """Log observability events."""
@@ -377,6 +551,7 @@ class WorkflowService:
         reconciliation_engine: Optional[ReconciliationEngine] = None,
         accrual_engine: Optional[AccrualEngine] = None,
         depreciation_engine: Optional[DepreciationEngine] = None,
+        ap_engine: Optional[APEngine] = None,
         exception_generator: Optional[ExceptionGenerator] = None,
         financial_review_agent: Optional[FinancialReviewAgent] = None,
         policy_retriever: Optional[PolicyRetriever] = None,
@@ -397,6 +572,7 @@ class WorkflowService:
             _rec = reconciliation_engine or ReconciliationEngine()
             _acc = accrual_engine or AccrualEngine()
             _dep = depreciation_engine or DepreciationEngine()
+            _ap = ap_engine or APEngine()
             _exc = exception_generator or ExceptionGenerator()
             _a1 = financial_review_agent or FinancialReviewAgent()
             _rag = policy_retriever or PolicyRetriever()
@@ -408,6 +584,7 @@ class WorkflowService:
                 reconciliation_engine=_rec,
                 accrual_engine=_acc,
                 depreciation_engine=_dep,
+                ap_engine=_ap,
                 exception_generator=_exc,
                 financial_review_agent=_a1,
                 policy_retriever=_rag,

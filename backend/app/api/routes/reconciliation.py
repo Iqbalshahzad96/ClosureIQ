@@ -176,32 +176,102 @@ class AccrualRunRequest(BaseRunRequest):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     workflow_type: Literal["accrual"] = "accrual"
-    accrual_entries: List[AccrualEntryItem] = Field(..., min_length=1, description="List of accrual entries to validate")
-    historical_baseline: Dict[str, AccrualBaselineValue] = Field(..., min_length=1, description="Historical baseline metrics")
+    account_code: Optional[str] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    accrual_entries: Optional[List[AccrualEntryItem]] = Field(default=None, description="Optional explicit accrual entries")
+    historical_baseline: Optional[Dict[str, AccrualBaselineValue]] = Field(default=None, description="Optional historical baseline metrics")
+
+    @field_validator("account_code")
+    @classmethod
+    def validate_account_code(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("account_code cannot be blank or whitespace.")
+        return v.strip() if v is not None else None
 
     @field_validator("historical_baseline")
     @classmethod
-    def validate_baseline_keys(cls, v: Dict[str, AccrualBaselineValue]) -> Dict[str, AccrualBaselineValue]:
-        for k in v.keys():
-            if not isinstance(k, str) or not k.strip():
-                raise ValueError(f"historical_baseline key cannot be blank or whitespace: {k!r}")
+    def validate_baseline_keys(cls, v: Optional[Dict[str, AccrualBaselineValue]]) -> Optional[Dict[str, AccrualBaselineValue]]:
+        if v is not None:
+            for k in v.keys():
+                if not isinstance(k, str) or not k.strip():
+                    raise ValueError(f"historical_baseline key cannot be blank or whitespace: {k!r}")
         return v
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "AccrualRunRequest":
+        if not self.accrual_entries and not self.account_code:
+            raise ValueError("Accrual workflow requires either explicit accrual_entries or account_code.")
+        if self.accrual_entries is not None and self.historical_baseline is None:
+            raise ValueError("Accrual workflow requires historical_baseline when explicit accrual_entries are provided.")
+        return self
 
 
 class DepreciationRunRequest(BaseRunRequest):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     workflow_type: Literal["depreciation"] = "depreciation"
-    asset_records: List[AssetRecordItem] = Field(..., min_length=1, description="List of asset records")
-    period_posted_depreciation: Dict[str, PostedDepreciationValue] = Field(..., min_length=1, description="Posted depreciation amounts per asset")
+    category: Optional[str] = None
+    status: Optional[str] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    asset_records: Optional[List[AssetRecordItem]] = Field(default=None, description="Optional explicit asset records")
+    period_posted_depreciation: Optional[Dict[str, PostedDepreciationValue]] = Field(default=None, description="Optional posted depreciation per asset")
+
+    @field_validator("category", "status")
+    @classmethod
+    def validate_filter_strings(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("Filter string cannot be blank or whitespace.")
+        return v
 
     @field_validator("period_posted_depreciation")
     @classmethod
-    def validate_posted_keys(cls, v: Dict[str, PostedDepreciationValue]) -> Dict[str, PostedDepreciationValue]:
-        for k in v.keys():
-            if not isinstance(k, str) or not k.strip():
-                raise ValueError(f"period_posted_depreciation key cannot be blank or whitespace: {k!r}")
+    def validate_posted_keys(cls, v: Optional[Dict[str, PostedDepreciationValue]]) -> Optional[Dict[str, PostedDepreciationValue]]:
+        if v is not None:
+            for k in v.keys():
+                if not isinstance(k, str) or not k.strip():
+                    raise ValueError(f"period_posted_depreciation key cannot be blank or whitespace: {k!r}")
         return v
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "DepreciationRunRequest":
+        if self.period == "CURRENT" and not self.asset_records and not self.category and not self.status:
+            raise ValueError("Depreciation workflow requires explicit asset_records or a specific period/category filter.")
+        return self
+
+
+class APReviewRunRequest(BaseRunRequest):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    workflow_type: Literal["ap_review"] = "ap_review"
+    vendor_name: Optional[str] = None
+    status: Optional[str] = None
+    limit: int = Field(default=50, ge=1, le=100)
+
+    @field_validator("vendor_name", "status")
+    @classmethod
+    def validate_non_blank_optional_str(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("String field cannot be blank or whitespace.")
+        return v
+
+
+class APShortRunRequest(BaseRunRequest):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    workflow_type: Literal["ap"] = "ap"
+    vendor_name: Optional[str] = None
+    status: Optional[str] = None
+    limit: int = Field(default=50, ge=1, le=100)
+
+    @field_validator("vendor_name", "status")
+    @classmethod
+    def validate_non_blank_optional_str(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("String field cannot be blank or whitespace.")
+        return v
+
+
+APRunRequest = Union[APReviewRunRequest, APShortRunRequest]
 
 
 def get_workflow_type(v: Any) -> str:
@@ -215,6 +285,8 @@ WorkflowRunRequest = Annotated[
         Annotated[ReconciliationRunRequest, Tag("reconciliation")],
         Annotated[AccrualRunRequest, Tag("accrual")],
         Annotated[DepreciationRunRequest, Tag("depreciation")],
+        Annotated[APReviewRunRequest, Tag("ap_review")],
+        Annotated[APShortRunRequest, Tag("ap")],
     ],
     Discriminator(get_workflow_type),
 ]
@@ -226,29 +298,48 @@ async def run_reconciliation(
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> Dict[str, Any]:
     """
-    Trigger deterministic financial close workflow (reconciliation, accrual, or depreciation).
+    Trigger deterministic financial close workflow (reconciliation, accrual, depreciation, or ap_review).
     Returns clean_close, hitl_pending, or error based on actual graph execution state.
     """
     if isinstance(payload, ReconciliationRunRequest):
         input_params = {
             "account_code": payload.account_code,
             "limit": payload.limit,
+            "period": payload.period,
         }
     elif isinstance(payload, AccrualRunRequest):
         input_params = {
-            "accrual_entries": [e.model_dump() for e in payload.accrual_entries],
-            "historical_baseline": {
+            "account_code": payload.account_code,
+            "limit": payload.limit,
+            "period": payload.period,
+        }
+        if payload.accrual_entries is not None:
+            input_params["accrual_entries"] = [e.model_dump() for e in payload.accrual_entries]
+        if payload.historical_baseline is not None:
+            input_params["historical_baseline"] = {
                 k: (v.model_dump() if hasattr(v, "model_dump") else v)
                 for k, v in payload.historical_baseline.items()
-            },
-        }
+            }
     elif isinstance(payload, DepreciationRunRequest):
         input_params = {
-            "asset_records": [a.model_dump() for a in payload.asset_records],
-            "period_posted_depreciation": {
+            "category": payload.category,
+            "status": payload.status,
+            "limit": payload.limit,
+            "period": payload.period,
+        }
+        if payload.asset_records is not None:
+            input_params["asset_records"] = [a.model_dump() for a in payload.asset_records]
+        if payload.period_posted_depreciation is not None:
+            input_params["period_posted_depreciation"] = {
                 k: (v.model_dump() if hasattr(v, "model_dump") else v)
                 for k, v in payload.period_posted_depreciation.items()
-            },
+            }
+    elif isinstance(payload, (APReviewRunRequest, APShortRunRequest)):
+        input_params = {
+            "vendor_name": payload.vendor_name,
+            "status": payload.status,
+            "limit": payload.limit,
+            "period": payload.period,
         }
     else:
         input_params = {}
