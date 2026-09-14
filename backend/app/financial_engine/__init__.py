@@ -10,6 +10,7 @@ from app.financial_engine.accrual import AccrualEngine
 from app.financial_engine.depreciation import DepreciationEngine
 from app.financial_engine.ap import APEngine
 from app.financial_engine.exceptions import ExceptionGenerator, FinancialException
+from app.financial_engine.trial_balance import TrialBalanceEngine
 
 __all__ = [
     "ReconciliationEngine",
@@ -18,4 +19,5 @@ __all__ = [
     "APEngine",
     "ExceptionGenerator",
     "FinancialException",
+    "TrialBalanceEngine",
 ]

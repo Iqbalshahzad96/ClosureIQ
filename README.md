@@ -35,12 +35,14 @@ $env:CHROMA_PERSIST_DIRECTORY = './chroma_data'
 # Set GEMINI_API_KEY in this shell for live agent calls.
 
 # Create missing tables; this does not migrate existing schemas.
-python -c "from app.database.database import Base, engine; import app.database.models; Base.metadata.create_all(bind=engine)"
+python -c "from app.database.database import initialize_database; initialize_database()"
 python ../scripts/ingest_policies.py
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 Environment variables must be set explicitly; the backend does not automatically load `.env`. Policy ingestion may download an embedding model. Keep one worker because workflow checkpoints are in memory.
+
+Relative SQLite paths resolve from `backend/`, regardless of the launch directory. The default `sqlite:///./closureiq.db` uses `backend/closureiq.db`; the setup above explicitly selects the populated repository-root `closureiq.db`. API startup creates missing tables (including `audit_events`) on the same engine used by API sessions and logs the actual SQLite path. Initialization preserves existing rows and does not migrate columns in existing tables.
 
 **Do not use `scripts/seed_database.py` for routine initialization:** it drops/recreates tables and can erase imported data.
 
