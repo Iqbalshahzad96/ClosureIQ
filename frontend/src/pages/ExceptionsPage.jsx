@@ -15,13 +15,85 @@ import {
 } from 'lucide-react';
 import { fetchExceptions } from '../services/reconciliationService';
 
+export function sanitizeErrorMessage(rawError) {
+  if (!rawError) return 'An error occurred while loading exceptions.';
+  const str = typeof rawError === 'string' ? rawError : rawError.message || String(rawError);
+  const sensitivePatterns = [
+    /sqlite/i,
+    /operationalerror/i,
+    /syntaxerror/i,
+    /database/i,
+    /traceback/i,
+    /table:/i,
+    /column:/i,
+    /\.py\b/i,
+    /\.js\b/i,
+    /sql/i,
+    /select /i,
+    /insert /i,
+    /update /i,
+    /delete /i,
+  ];
+  if (sensitivePatterns.some((pattern) => pattern.test(str))) {
+    return 'Unable to load financial exceptions due to a server error. Please try again later.';
+  }
+  return str || 'Unable to load financial exceptions due to a server error. Please try again later.';
+}
+
+export function normalizeExceptionsList(raw) {
+  let list = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (raw && Array.isArray(raw.exceptions)) {
+    list = raw.exceptions;
+  } else if (raw && Array.isArray(raw.items)) {
+    list = raw.items;
+  } else if (raw && Array.isArray(raw.data)) {
+    list = raw.data;
+  }
+
+  return list
+    .filter((item) => item !== null && typeof item === 'object')
+    .map((item, index) => {
+      const id = item.id ? String(item.id) : `exc-synthetic-${index}`;
+
+      let amountVariance = null;
+      if (item.amount_variance !== undefined && item.amount_variance !== null) {
+        const num = Number(item.amount_variance);
+        amountVariance = Number.isFinite(num) ? num : null;
+      } else if (item.variance_amount !== undefined && item.variance_amount !== null) {
+        const num = Number(item.variance_amount);
+        amountVariance = Number.isFinite(num) ? num : null;
+      } else if (item.variance !== undefined && item.variance !== null) {
+        const num = Number(item.variance);
+        amountVariance = Number.isFinite(num) ? num : null;
+      }
+
+      return {
+        ...item,
+        id,
+        account_code: item.account_code || item.account_id || 'General Exception',
+        category: item.category || 'General',
+        severity: item.severity || 'MEDIUM',
+        status: item.status || 'OPEN',
+        description: item.description || 'No description provided',
+        period: item.period || 'N/A',
+        run_id: item.run_id || null,
+        amount_variance: amountVariance,
+        variance_amount: amountVariance,
+        lineage: (item.lineage && typeof item.lineage === 'object') ? item.lineage : {},
+        details: (item.details && typeof item.details === 'object') ? item.details : null,
+      };
+    });
+}
+
 export default function ExceptionsPage() {
   const [exceptions, setExceptions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [selectedCategory, setSelectedCategory] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('');
-  const [period, setPeriod] = useState('2026-Q1');
+  const [period, setPeriod] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedId, setExpandedId] = useState(null);
 
@@ -44,13 +116,13 @@ export default function ExceptionsPage() {
     setError(null);
     try {
       const data = await fetchExceptions({
-        period: period || undefined,
+        period: period.trim() || undefined,
         category: selectedCategory || undefined,
         status: selectedStatus || undefined,
       });
-      setExceptions(Array.isArray(data) ? data : []);
+      setExceptions(normalizeExceptionsList(data));
     } catch (err) {
-      setError(err.message || 'Failed to load exceptions');
+      setError(sanitizeErrorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -61,13 +133,15 @@ export default function ExceptionsPage() {
   }, [selectedCategory, selectedStatus, period]);
 
   const filteredExceptions = exceptions.filter((exc) => {
+    if (!exc) return false;
     if (!searchTerm) return true;
     const term = searchTerm.toLowerCase();
     const accountCode = (exc.account_code || '').toLowerCase();
     const desc = (exc.description || '').toLowerCase();
     const cat = (exc.category || '').toLowerCase();
     const id = (exc.id || '').toLowerCase();
-    return accountCode.includes(term) || desc.includes(term) || cat.includes(term) || id.includes(term);
+    const runId = (exc.run_id || '').toLowerCase();
+    return accountCode.includes(term) || desc.includes(term) || cat.includes(term) || id.includes(term) || runId.includes(term);
   });
 
   const getSeverityBadge = (severity) => {
@@ -179,7 +253,7 @@ export default function ExceptionsPage() {
             type="text"
             value={period}
             onChange={(e) => setPeriod(e.target.value)}
-            placeholder="e.g. 2026-Q1"
+            placeholder="All periods"
             style={{
               width: '100px',
               padding: '0.5rem 0.75rem',
@@ -219,10 +293,11 @@ export default function ExceptionsPage() {
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
           {filteredExceptions.map((exc) => {
+            if (!exc) return null;
             const isExpanded = expandedId === exc.id;
             const lineage = exc.lineage || {};
-            const variance = exc.variance_amount !== null && exc.variance_amount !== undefined
-              ? Number(exc.variance_amount)
+            const variance = exc.amount_variance !== null && exc.amount_variance !== undefined
+              ? Number(exc.amount_variance)
               : null;
 
             return (
@@ -232,7 +307,7 @@ export default function ExceptionsPage() {
                 style={{
                   padding: '1.25rem',
                   borderLeft: `4px solid ${
-                    (exc.severity || '').toUpperCase() === 'HIGH'
+                    (exc.severity || '').toUpperCase() === 'HIGH' || (exc.severity || '').toUpperCase() === 'CRITICAL'
                       ? 'var(--accent-rose)'
                       : (exc.severity || '').toUpperCase() === 'MEDIUM'
                       ? 'var(--accent-amber)'
@@ -262,6 +337,9 @@ export default function ExceptionsPage() {
 
                     <div style={{ display: 'flex', gap: '1.25rem', marginTop: '0.5rem', fontSize: '0.8rem', color: 'var(--text-muted)', flexWrap: 'wrap' }}>
                       <span><strong>Period:</strong> {exc.period || 'N/A'}</span>
+                      {exc.run_id && (
+                        <span><strong>Run ID:</strong> {exc.run_id.slice(0, 8)}</span>
+                      )}
                       {variance !== null && (
                         <span>
                           <strong>Variance:</strong>{' '}

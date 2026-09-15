@@ -43,7 +43,13 @@ export default function PoliciesPage() {
     setError(null);
     try {
       const data = await fetchPolicyDocuments();
-      setDocuments(Array.isArray(data) ? data : []);
+      const rawDocs = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.documents)
+        ? data.documents
+        : [];
+      const docs = rawDocs.filter((d) => d && typeof d === 'object');
+      setDocuments(docs);
     } catch (err) {
       setError(err.message || 'Failed to load policy documents');
     } finally {
@@ -127,6 +133,14 @@ export default function PoliciesPage() {
         topK: 3,
       });
       setQueryResults(res.results || res.documents || res);
+      const results = Array.isArray(res)
+        ? res
+        : Array.isArray(res?.results)
+        ? res.results
+        : Array.isArray(res?.documents)
+        ? res.documents
+        : [];
+      setQueryResults(results);
     } catch (err) {
       setError(err.message || 'Query failed');
     } finally {
@@ -373,12 +387,13 @@ export default function PoliciesPage() {
               </thead>
               <tbody>
                 {documents.map((doc, idx) => {
+                  if (!doc || typeof doc !== 'object') return null;
                   const docId = doc.doc_id || doc.id || `doc-${idx}`;
                   const isDeleting = deletingId === docId;
                   return (
                     <tr key={docId} style={{ borderBottom: '1px solid var(--border-color)' }}>
                       <td style={{ padding: '0.75rem 0.5rem', fontWeight: 600 }}>
-                        {doc.policy_name || docId}
+                        {doc.policy_name || doc.title || doc.policy_id || docId}
                       </td>
                       <td style={{ padding: '0.75rem 0.5rem', color: 'var(--text-secondary)', fontFamily: 'monospace', fontSize: '0.8rem' }}>
                         {doc.filename || `${docId}.md`}
@@ -389,10 +404,10 @@ export default function PoliciesPage() {
                         </span>
                       </td>
                       <td style={{ padding: '0.75rem 0.5rem' }}>
-                        {doc.chunk_count || doc.chunks || 1}
+                        {doc.chunk_count || doc.chunks_count || doc.chunks || 1}
                       </td>
                       <td style={{ padding: '0.75rem 0.5rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-                        {doc.created_at ? new Date(doc.created_at).toLocaleDateString() : 'Active'}
+                        {doc.created_at || doc.last_ingested ? new Date(doc.created_at || doc.last_ingested).toLocaleDateString() : 'Active'}
                       </td>
                       <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>
                         <button

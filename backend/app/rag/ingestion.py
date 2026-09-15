@@ -94,19 +94,34 @@ class PolicyDocumentIngester:
         if h1_match:
             title = h1_match.group(1).strip()
 
-        # Look for Policy ID (e.g. Policy ACC-001, SOP-102, POL-REC-01)
-        pid_match = re.search(r"(?:Policy|SOP|Rule|POL)[:\s]+([A-Z]{2,5}-\d{2,4})", text, re.IGNORECASE)
+        # Look for Policy ID (e.g. Policy ACC-001, Policy ID: ACC-001, SOP-102, POL-REC-01)
+        pid_match = re.search(r"(?:Policy(?:\s+ID)?|SOP|Rule|POL)[:\s]+([A-Z]{2,5}-\d{2,4})", text, re.IGNORECASE)
         if pid_match:
             policy_id = pid_match.group(1).upper()
+        elif filename:
+            fn_match = re.search(r"([A-Z]{2,5}-\d{2,4})", filename, re.IGNORECASE)
+            if fn_match:
+                policy_id = fn_match.group(1).upper()
 
-        # Heuristic category determination
-        text_lower = text.lower()
-        if "reconciliation" in text_lower or "bank" in text_lower:
-            category = "BANK_RECONCILIATION"
-        elif "accrual" in text_lower or "expense matching" in text_lower:
-            category = "ACCRUAL"
-        elif "depreciation" in text_lower or "fixed asset" in text_lower:
-            category = "DEPRECIATION"
+        # Check explicit Category line if present
+        cat_match = re.search(r"Category[:\s]+([A-Z_]+)", text, re.IGNORECASE)
+        if cat_match:
+            category = cat_match.group(1).strip().upper()
+        else:
+            # Heuristic category determination
+            text_lower = text.lower()
+            if "reconciliation" in text_lower or "bank" in text_lower:
+                category = "BANK_RECONCILIATION"
+            elif "accrual" in text_lower or "expense matching" in text_lower or "expense recognition" in text_lower:
+                category = "ACCRUAL"
+            elif "depreciation" in text_lower or "fixed asset" in text_lower:
+                category = "DEPRECIATION"
+            elif "accounts payable" in text_lower or "invoice" in text_lower or "vendor" in text_lower:
+                category = "ACCOUNTS_PAYABLE"
+            elif "materiality" in text_lower or "escalation" in text_lower or "threshold" in text_lower:
+                category = "MATERIALITY"
+            elif "approval" in text_lower or "journal adjustment" in text_lower or "human" in text_lower or "hitl" in text_lower:
+                category = "APPROVAL_CONTROLS"
 
         return {
             "title": title,
@@ -186,14 +201,25 @@ class PolicyDocumentIngester:
 
         for idx, chk in enumerate(chunks):
             chunk_text = chk["text"]
-            chunk_meta = {
-                **base_metadata,
+            chunk_meta = dict(base_metadata)
+
+            # Check if this specific section specifies its own Policy ID
+            sec_pid = re.search(r"(?:Policy(?:\s+ID)?|SOP|Rule|POL)[:\s]+([A-Z]{2,5}-\d{2,4})", chunk_text, re.IGNORECASE)
+            if sec_pid:
+                chunk_meta["policy_id"] = sec_pid.group(1).upper()
+
+            # Check if this specific section specifies a category
+            sec_cat = re.search(r"Category[:\s]+([A-Z_]+)", chunk_text, re.IGNORECASE)
+            if sec_cat:
+                chunk_meta["category"] = sec_cat.group(1).strip().upper()
+
+            chunk_meta.update({
                 "section": chk["section"],
                 "chunk_index": idx,
                 "total_chunks": total_chunks,
                 "char_count": len(chunk_text),
                 "ingested_at": ingested_at,
-            }
+            })
             results.append({
                 "chunk_id": f"{base_metadata['doc_id']}_chunk_{idx}",
                 "text": chunk_text,

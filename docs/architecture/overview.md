@@ -53,7 +53,7 @@ This shows backend wiring, not completed UI workflows. The service calls `Financ
 | Database | SQLite through SQLAlchemy 2; canonical schema plus legacy financial model. |
 | MCP | Requirements declare `mcp==2.1.1`; `MCPServer` registers GL query, bank query and exception detail tools. `get_account_balance` raises `NotImplementedError` and is not registered. No standalone transport launch command is supplied. |
 | Orchestration | LangGraph `StateGraph`, Pydantic state, injected node dependencies, `interrupt`, `Command(resume=...)`, application-lifetime `MemorySaver`. |
-| Two agents | Agent 1 classifies supplied exceptions while preserving engine severity. Agent 2 returns root-cause hypotheses and textual recommendations grounded in supplied evidence. Both use `google-genai`, default `gemini-2.5-flash`, structured response validation and separated system instructions/data. |
+| Two agents | Agent 1 classifies supplied exceptions while preserving engine severity. Agent 2 returns root-cause hypotheses and textual recommendations grounded in supplied evidence. Both use `google-genai`, default `gemini-3.1-flash-lite`, structured response validation and separated system instructions/data. |
 | RAG | Direct ChromaDB client, persistent `accounting_policies` collection, cosine distance, default Chroma embeddings and custom chunking/retrieval. LangChain/langchain-core are declared dependencies, but this RAG implementation is not a LangChain chain. |
 | Observability | Console logger and node timings/errors in graph state. Metrics/tracer helpers exist; HTTP telemetry endpoints return placeholders. No complete persisted token/cost/HITL audit pipeline. |
 | HITL | Whole-run approval/rejection changes workflow state; it does not post an adjustment. |
@@ -192,7 +192,7 @@ python -m pip install -r requirements.txt
 # Select the root database explicitly from backend/.
 $env:DATABASE_URL = 'sqlite:///../closureiq.db'
 $env:CHROMA_PERSIST_DIRECTORY = './chroma_data'
-$env:GEMINI_MODEL = 'gemini-2.5-flash'
+$env:GEMINI_MODEL = 'gemini-3.1-flash-lite'
 # Set GEMINI_API_KEY in this shell for live model calls.
 ```
 

@@ -2,7 +2,7 @@
 
 [Project entry point](../../README.md) | [Architecture and setup](../architecture/overview.md) | [Ingestion](../ingestion/pipeline.md)
 
-Exactly two agents use `google-genai` (default `gemini-2.5-flash`) with validated structured output and separate system instructions and supplied data. Financial calculations belong to deterministic engines.
+Exactly two agents use `google-genai` (default `gemini-3.1-flash-lite`) with validated structured output and separate system instructions and supplied data. Financial calculations belong to deterministic engines.
 
 | Component | Current responsibility |
 |---|---|

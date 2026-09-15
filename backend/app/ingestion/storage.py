@@ -94,18 +94,40 @@ class RawStorageManager:
             relative_path = os.path.relpath(target_path).replace("\\", "/")
         except ValueError:
             relative_path = os.path.relpath(target_path, root).replace("\\", "/")
+            # Cross-drive on Windows: path cannot be relative across drive boundaries, use absolute resolved path
+            relative_path = str(target_path.resolve()).replace("\\", "/")
         return relative_path, sha256, byte_size
 
-    def read_file(self, relative_path: str) -> bytes:
-        """Read bytes of an existing stored raw file."""
+    def resolve_path(self, relative_path: str) -> Path:
+        """Resolve a stored raw file path, ensuring containment within storage root."""
         root = Path(self.base_storage_dir).resolve()
         try:
             full_path = Path(os.path.abspath(relative_path)).resolve()
         except Exception:
             full_path = (root / relative_path).resolve()
+        candidate = Path(relative_path)
+        if candidate.is_absolute():
+            full_path = candidate.resolve()
+        else:
+            # First check if relative to cwd and within root and exists
+            try:
+                cwd_candidate = Path(os.path.abspath(relative_path)).resolve()
+                if cwd_candidate.is_relative_to(root) and cwd_candidate.exists():
+                    full_path = cwd_candidate
+                else:
+                    full_path = (root / relative_path).resolve()
+            except Exception:
+                full_path = (root / relative_path).resolve()
+
         if not full_path.is_relative_to(root):
             full_path = (root / relative_path).resolve()
         if not full_path.is_relative_to(root):
             raise ValueError("Storage path escapes root")
+
+        return full_path
+
+    def read_file(self, relative_path: str) -> bytes:
+        """Read bytes of an existing stored raw file."""
+        full_path = self.resolve_path(relative_path)
         with open(full_path, "rb") as f:
             return f.read()

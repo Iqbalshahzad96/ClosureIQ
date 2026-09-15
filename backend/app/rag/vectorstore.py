@@ -125,18 +125,25 @@ class VectorStoreManager:
             for meta in metadatas:
                 if not meta:
                     continue
-                doc_id = meta.get("doc_id", "unknown")
-                if doc_id not in docs_map:
-                    docs_map[doc_id] = {
-                        "doc_id": doc_id,
-                        "filename": meta.get("filename", "unknown"),
-                        "title": meta.get("title", doc_id),
-                        "policy_id": meta.get("policy_id", ""),
+                # Aggregate by stable document identifier
+                doc_key = meta.get("doc_id") or meta.get("policy_id") or "unknown"
+                policy_id = meta.get("policy_id") or doc_key
+                title = meta.get("title") or doc_key
+                if doc_key not in docs_map:
+                    docs_map[doc_key] = {
+                        "doc_id": doc_key,
+                        "policy_id": policy_id,
+                        "policy_name": title,
+                        "title": title,
+                        "filename": meta.get("filename", f"{doc_key}.md"),
                         "category": meta.get("category", "GENERAL"),
                         "chunks_count": 0,
+                        "chunk_count": 0,
                         "last_ingested": meta.get("ingested_at", ""),
+                        "created_at": meta.get("ingested_at", ""),
                     }
-                docs_map[doc_id]["chunks_count"] += 1
+                docs_map[doc_key]["chunks_count"] += 1
+                docs_map[doc_key]["chunk_count"] += 1
 
             return list(docs_map.values())
         except Exception:

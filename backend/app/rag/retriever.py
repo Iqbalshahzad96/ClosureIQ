@@ -88,8 +88,14 @@ class PolicyRetriever:
             retrieved.append({
                 "chunk_id": doc_id,
                 "content": text,
+                "text": text,
                 "metadata": meta,
+                "policy_id": policy_id,
+                "policy_name": title,
+                "title": title,
+                "category": meta.get("category", "GENERAL"),
                 "distance": round(float(dist), 4) if dist is not None else 0.0,
+                "score": round(float(dist), 4) if dist is not None else 0.0,
                 "citation": citation,
             })
 
