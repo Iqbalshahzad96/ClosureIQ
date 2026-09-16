@@ -12,6 +12,7 @@ from app.api.routes import (
     observability,
     rag,
     imports,
+    financial_data,
 )
 
 api_router = APIRouter()
@@ -25,3 +26,4 @@ api_router.include_router(approvals.router)
 api_router.include_router(observability.router)
 api_router.include_router(rag.router)
 api_router.include_router(imports.router)
+api_router.include_router(financial_data.router)

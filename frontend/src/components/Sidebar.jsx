@@ -4,7 +4,7 @@ import { LayoutDashboard, UploadCloud, Scale, AlertTriangle, CheckSquare, LineCh
 export default function Sidebar({ activeTab, setActiveTab }) {
   const menuItems = [
     { id: 'dashboard', label: 'Overview', icon: LayoutDashboard },
-    { id: 'financial-upload', label: 'Financial Upload', icon: UploadCloud },
+    { id: 'financial-upload', label: 'Financial Data', icon: UploadCloud },
     { id: 'reconciliation', label: 'Reconciliation', icon: Scale },
     { id: 'exceptions', label: 'Exceptions', icon: AlertTriangle },
     { id: 'approvals', label: 'Approvals (HITL)', icon: CheckSquare },

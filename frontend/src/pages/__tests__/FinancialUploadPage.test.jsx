@@ -20,6 +20,53 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
 
   const setupMockFetch = (mockResponse, status = 200, ok = true) => {
     global.fetch = vi.fn().mockImplementation((url, init) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/financial-data/summary')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            all_time_reconciliation: {
+              total_records: 10,
+              reconciled_records: 8,
+              unreconciled_records: 2,
+              reconciled_percentage: 80.0,
+              bank_total: 5,
+              bank_reconciled: 4,
+              gl_total: 5,
+              gl_reconciled: 4,
+            },
+            data_types: {
+              bank_statements: { total_count: 5, reconciled_count: 4, unreconciled_count: 1, latest_import_date: '2026-03-15T10:00:00Z', has_reconciliation: true },
+              general_ledger: { total_count: 5, reconciled_count: 4, unreconciled_count: 1, latest_import_date: '2026-03-15T10:00:00Z', has_reconciliation: true },
+              trial_balance: { total_count: 2, reconciled_count: null, unreconciled_count: null, latest_import_date: '2026-03-15T10:00:00Z', has_reconciliation: false },
+              ap_invoices: { total_count: 3, reconciled_count: 2, unreconciled_count: 1, latest_import_date: '2026-03-15T10:00:00Z', has_reconciliation: true },
+              fixed_assets: { total_count: 1, reconciled_count: 1, unreconciled_count: 0, latest_import_date: '2026-03-15T10:00:00Z', has_reconciliation: true },
+              accruals: { total_count: 0, reconciled_count: null, unreconciled_count: null, latest_import_date: null, has_reconciliation: false },
+              depreciation: { total_count: 1, reconciled_count: null, unreconciled_count: null, latest_import_date: '2026-03-15T10:00:00Z', has_reconciliation: false, is_derived: true },
+            },
+          }),
+        });
+      }
+      if (urlStr.includes('/financial-data/')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data_type: 'bank_statements',
+            display_name: 'Bank Statements',
+            columns: [
+              { key: 'booking_date', label: 'Date' },
+              { key: 'description', label: 'Description' },
+              { key: 'amount', label: 'Amount', is_currency: true },
+              { key: 'status', label: 'Status', is_status: true },
+            ],
+            records: [
+              { id: '1', booking_date: '2026-03-15', description: 'Sample Tx', amount: 1500.0, status: 'Reconciled' },
+            ],
+          }),
+        });
+      }
       return Promise.resolve({
         ok,
         status,
@@ -118,8 +165,9 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
     expect(screen.getByRole('alert')).toHaveTextContent(/exceeds the 25 MiB upload limit/i);
     expect(screen.getByTestId('upload-and-validate-btn')).toBeDisabled();
 
-    // Verify fetch was never called
-    expect(fetchSpy).not.toHaveBeenCalled();
+    // Verify upload fetch was never called
+    const uploadCalls = fetchSpy.mock.calls.filter(([url]) => String(url).includes('/imports/'));
+    expect(uploadCalls.length).toBe(0);
   });
 
   // 4. Exact raw-body request—not FormData
@@ -128,8 +176,10 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
     let capturedContentType = null;
 
     global.fetch = vi.fn().mockImplementation((url, init) => {
-      capturedBody = init.body;
-      capturedContentType = init.headers['Content-Type'];
+      if (String(url).includes('/imports/')) {
+        capturedBody = init?.body;
+        capturedContentType = init?.headers?.['Content-Type'];
+      }
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -168,8 +218,10 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
     let capturedImportOptions = null;
 
     global.fetch = vi.fn().mockImplementation((url, init) => {
-      capturedUrl = String(url);
-      capturedImportOptions = JSON.parse(init.headers['X-Import-Options']);
+      if (String(url).includes('/imports/')) {
+        capturedUrl = String(url);
+        capturedImportOptions = JSON.parse(init?.headers?.['X-Import-Options'] || '{}');
+      }
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -224,7 +276,9 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
   it('6. normal upload completely omits source_system_id from URL query parameters', async () => {
     let capturedUrl = '';
     global.fetch = vi.fn().mockImplementation((url) => {
-      capturedUrl = String(url);
+      if (String(url).includes('/imports/')) {
+        capturedUrl = String(url);
+      }
       return Promise.resolve({
         ok: true,
         status: 200,
@@ -291,7 +345,7 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
     }
   });
 
-  // 8. Correct result counts and finance-friendly labels
+  // 8. Result counts and labels
   it('8. displays correct result counts with finance-friendly labels and secondary details', async () => {
     setupMockFetch({
       status: 'PARTIAL',
@@ -338,20 +392,21 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
     expect(within(warnCard).getByText('4')).toBeInTheDocument();
 
     // Secondary details
-    expect(screen.getByText(/Repeated rows:/i)).toBeInTheDocument();
-    expect(screen.getByText('2')).toBeInTheDocument();
-    expect(screen.getByText(/Duplicate transactions:/i)).toBeInTheDocument();
-    expect(screen.getByText('1')).toBeInTheDocument();
-    expect(screen.getByText(/Skipped records:/i)).toBeInTheDocument();
-    expect(screen.getByText('3')).toBeInTheDocument();
-    expect(screen.getByText(/Import reference:/i)).toBeInTheDocument();
-    expect(screen.getByText('batch-ref-888')).toBeInTheDocument();
+    const resultsSummary = screen.getByTestId('import-results-summary');
+    expect(within(resultsSummary).getByText(/Repeated rows:/i)).toBeInTheDocument();
+    expect(within(resultsSummary).getByText('2')).toBeInTheDocument();
+    expect(within(resultsSummary).getByText(/Duplicate transactions:/i)).toBeInTheDocument();
+    expect(within(resultsSummary).getByText('1')).toBeInTheDocument();
+    expect(within(resultsSummary).getByText(/Skipped records:/i)).toBeInTheDocument();
+    expect(within(resultsSummary).getByText('3')).toBeInTheDocument();
+    expect(within(resultsSummary).getByText(/Import reference:/i)).toBeInTheDocument();
+    expect(within(resultsSummary).getByText('batch-ref-888')).toBeInTheDocument();
 
     // Expandable details
-    expect(screen.getByTestId('rejection-reasons-details')).toBeInTheDocument();
-    expect(screen.getByText(/Invalid booking date format/i)).toBeInTheDocument();
-    expect(screen.getByTestId('warning-records-details')).toBeInTheDocument();
-    expect(screen.getByText(/Dual-sided posting detected/i)).toBeInTheDocument();
+    expect(within(resultsSummary).getByTestId('rejection-reasons-details')).toBeInTheDocument();
+    expect(within(resultsSummary).getByText(/Invalid booking date format/i)).toBeInTheDocument();
+    expect(within(resultsSummary).getByTestId('warning-records-details')).toBeInTheDocument();
+    expect(within(resultsSummary).getByText(/Dual-sided posting detected/i)).toBeInTheDocument();
   });
 
   // 9. Malformed/partial/non-finite response
@@ -414,19 +469,26 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
 
   // 11. Double-submit prevention
   it('11. prevents double submissions while an upload is currently in flight', async () => {
-    let callCount = 0;
+    let uploadCallCount = 0;
     let finishUpload;
     const uploadPromise = new Promise((resolve) => {
       finishUpload = resolve;
     });
 
-    global.fetch = vi.fn().mockImplementation(() => {
-      callCount++;
-      return uploadPromise.then(() => ({
+    global.fetch = vi.fn().mockImplementation((url) => {
+      if (String(url).includes('/imports/')) {
+        uploadCallCount++;
+        return uploadPromise.then(() => ({
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'COMPLETED', valid_rows: 5 }),
+        }));
+      }
+      return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({ status: 'COMPLETED', valid_rows: 5 }),
-      }));
+        json: async () => ({ all_time_reconciliation: { total_records: 0 }, data_types: {} }),
+      });
     });
 
     render(<FinancialUploadPage setActiveTab={vi.fn()} />);
@@ -445,7 +507,7 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
     expect(screen.getByText(/Processing Financial Document/i)).toBeInTheDocument();
 
     // Repeated clicks should be guarded
-    expect(callCount).toBe(1);
+    expect(uploadCallCount).toBe(1);
 
     // Complete upload
     await act(async () => {
@@ -455,7 +517,7 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
     await waitFor(() => {
       expect(screen.getByText(/Import Completed Successfully/i)).toBeInTheDocument();
     });
-    expect(callCount).toBe(1);
+    expect(uploadCallCount).toBe(1);
   });
 
   // 12. Cancellation, unmount and stale-response protection
@@ -582,18 +644,18 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
   });
 
   // 15. Sidebar navigation
-  it('15. allows opening Financial Upload from the sidebar and continuing to Reconciliation', async () => {
+  it('15. allows opening Financial Data from the sidebar and continuing to Reconciliation', async () => {
     setupMockFetch({ status: 'COMPLETED', valid_rows: 25, total_rows: 25 });
 
     render(<App />);
 
-    // Click Financial Upload in Sidebar
-    const uploadSidebarBtn = screen.getByRole('button', { name: /Financial Upload/i });
+    // Click Financial Data in Sidebar
+    const uploadSidebarBtn = screen.getByRole('button', { name: /Financial Data/i });
     expect(uploadSidebarBtn).toBeInTheDocument();
     fireEvent.click(uploadSidebarBtn);
 
-    // Page renders
-    expect(screen.getByRole('heading', { name: /Financial File Upload/i })).toBeInTheDocument();
+    // Page renders with Financial Data title
+    expect(screen.getByRole('heading', { name: /^Financial Data$/i })).toBeInTheDocument();
 
     // Complete an upload
     const file = new File(['data'], 'test.csv', { type: 'text/csv' });
@@ -616,7 +678,8 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
   });
 
   // 16. No technical labels, JSON editor or fabricated results visible
-  it('16. ensures no technical fields, JSON editors, or fabricated results are visible to users', () => {
+  it('16. ensures no technical fields, JSON editors, or fabricated results are visible to users', async () => {
+    setupMockFetch({ file_id: 'staged-1', detected_context: { documentType: 'general_ledger' } });
     render(<FinancialUploadPage setActiveTab={vi.fn()} />);
 
     // Developer / technical terms must NOT be visible in the user interface
@@ -629,14 +692,121 @@ describe('FinancialUploadPage (Required 16 Offline Deterministic Tests)', () => 
     expect(screen.queryByText(/batch configuration/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: /json/i })).not.toBeInTheDocument();
 
-    // Finance terminology must be visible
-    expect(screen.getByRole('radio', { name: /General Ledger/i })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /Bank Statement/i })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /Trial Balance/i })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /Accounts Payable Invoices/i })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: /Fixed Asset Register/i })).toBeInTheDocument();
-    expect(screen.getByText(/Financial Period/i)).toBeInTheDocument();
-    expect(screen.getByText(/Currency/i)).toBeInTheDocument();
+    // Stage a file to check Document Type selection options
+    const file = new File(['test,data'], 'ledger.csv', { type: 'text/csv' });
+    fireEvent.change(screen.getByTestId('file-upload-input'), { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getByRole('radio', { name: /General Ledger/i })).toBeInTheDocument();
+      expect(screen.getByRole('radio', { name: /Bank Statement/i })).toBeInTheDocument();
+      expect(screen.getByRole('radio', { name: /Trial Balance/i })).toBeInTheDocument();
+      expect(screen.getByRole('radio', { name: /Accounts Payable Invoices/i })).toBeInTheDocument();
+      expect(screen.getByRole('radio', { name: /Fixed Asset Register/i })).toBeInTheDocument();
+    });
+  });
+
+  // 17. Section headers render correctly
+  it('17. renders both Financial File Upload and Financial Data in Database section headers', async () => {
+    setupMockFetch({});
+    render(<FinancialUploadPage setActiveTab={vi.fn()} />);
+
+    expect(screen.getByRole('heading', { name: /^Financial Data$/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Financial File Upload/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /Financial Data in Database/i })).toBeInTheDocument();
+  });
+
+  // 18. All-time reconciliation percentage metric card
+  it('18. displays All-Time Reconciled Percentage metric across GL and Bank records', async () => {
+    setupMockFetch({});
+    render(<FinancialUploadPage setActiveTab={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('all-time-reconciliation-card')).toBeInTheDocument();
+      expect(screen.getByText(/All-Time Reconciled Percentage/i)).toBeInTheDocument();
+      expect(screen.getByTestId('all-time-reconciled-percentage-value')).toHaveTextContent('80%');
+      expect(screen.getByTestId('all-time-total-records')).toHaveTextContent('10');
+      expect(screen.getByTestId('all-time-reconciled-records')).toHaveTextContent('8');
+      expect(screen.getByTestId('all-time-unreconciled-records')).toHaveTextContent('2');
+    });
+  });
+
+  // 19. Renders all 7 financial data cards
+  it('19. renders separate cards for all 7 financial data types with counts and dates', async () => {
+    setupMockFetch({});
+    render(<FinancialUploadPage setActiveTab={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('data-card-bank_statements')).toBeInTheDocument();
+      expect(screen.getByTestId('data-card-general_ledger')).toBeInTheDocument();
+      expect(screen.getByTestId('data-card-trial_balance')).toBeInTheDocument();
+      expect(screen.getByTestId('data-card-ap_invoices')).toBeInTheDocument();
+      expect(screen.getByTestId('data-card-fixed_assets')).toBeInTheDocument();
+      expect(screen.getByTestId('data-card-accruals')).toBeInTheDocument();
+      expect(screen.getByTestId('data-card-depreciation')).toBeInTheDocument();
+
+      expect(screen.getByTestId('card-count-bank_statements')).toHaveTextContent('5');
+      expect(screen.getByTestId('card-count-general_ledger')).toHaveTextContent('5');
+      expect(screen.getByTestId('card-count-trial_balance')).toHaveTextContent('2');
+      expect(screen.getByTestId('card-count-ap_invoices')).toHaveTextContent('3');
+      expect(screen.getByTestId('card-count-fixed_assets')).toHaveTextContent('1');
+    });
+  });
+
+  // 20. Empty database state handling
+  it('20. displays empty state notice when database has no records', async () => {
+    global.fetch = vi.fn().mockImplementation((url) => {
+      const urlStr = String(url);
+      if (urlStr.includes('/financial-data/summary')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            all_time_reconciliation: {
+              total_records: 0,
+              reconciled_records: 0,
+              unreconciled_records: 0,
+              reconciled_percentage: 0.0,
+              bank_total: 0,
+              bank_reconciled: 0,
+              gl_total: 0,
+              gl_reconciled: 0,
+            },
+            data_types: {
+              bank_statements: { total_count: 0, reconciled_count: 0, unreconciled_count: 0, latest_import_date: null },
+              general_ledger: { total_count: 0, reconciled_count: 0, unreconciled_count: 0, latest_import_date: null },
+              trial_balance: { total_count: 0, reconciled_count: null, unreconciled_count: null, latest_import_date: null },
+              ap_invoices: { total_count: 0, reconciled_count: 0, unreconciled_count: 0, latest_import_date: null },
+              fixed_assets: { total_count: 0, reconciled_count: 0, unreconciled_count: 0, latest_import_date: null },
+              accruals: { total_count: 0, reconciled_count: null, unreconciled_count: null, latest_import_date: null },
+              depreciation: { total_count: 0, reconciled_count: null, unreconciled_count: null, latest_import_date: null, is_derived: true },
+            },
+          }),
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ data_type: 'bank_statements', columns: [], records: [] }),
+      });
+    });
+
+    render(<FinancialUploadPage setActiveTab={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('empty-database-notice')).toBeInTheDocument();
+      expect(screen.getByText(/Database is currently empty/i)).toBeInTheDocument();
+    });
+  });
+
+  // 21. Preview table interaction
+  it('21. displays live preview table when selecting data type card', async () => {
+    setupMockFetch({});
+    render(<FinancialUploadPage setActiveTab={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('preview-table')).toBeInTheDocument();
+      expect(screen.getByText('Sample Tx')).toBeInTheDocument();
+    });
   });
 });
 

@@ -181,18 +181,45 @@ def _build_production_deps(
 
         if workflow_type == "reconciliation":
             account_code = input_params.get("account_code")
-            if not account_code or not str(account_code).strip():
-                raise ValueError("account_code is required for reconciliation workflow")
-            account_code = str(account_code)
             limit = int(input_params.get("limit", 50))
+            period = input_params.get("period")
 
-            gl_records = await invoke("query_gl_transactions", mcp_tools.query_gl_transactions, account_code=account_code, limit=limit)
-            bank_records = await invoke("query_bank_transactions", mcp_tools.query_bank_transactions, account_code=account_code, limit=limit)
+            account_codes = []
+            if account_code and str(account_code).strip():
+                account_codes = [str(account_code).strip()]
+            else:
+                db = session_factory()
+                try:
+                    from app.database.models import BankAccount, Account
+                    bank_accounts = db.query(BankAccount, Account).join(
+                        Account, BankAccount.linked_gl_account_id == Account.id
+                    ).filter(
+                        BankAccount.is_active == True,
+                        Account.is_active == True
+                    ).all()
+                    account_codes = [gl.account_code for bank, gl in bank_accounts]
+                finally:
+                    db.close()
+
+            if not account_codes:
+                raise ValueError("No eligible bank accounts found for reconciliation.")
+
+            accounts_data = []
+            for acct in account_codes:
+                gl_records = await invoke(f"query_gl_transactions_{acct}", mcp_tools.query_gl_transactions, account_code=acct, limit=limit, fiscal_period=period)
+                bank_records = await invoke(f"query_bank_transactions_{acct}", mcp_tools.query_bank_transactions, account_code=acct, limit=limit)
+
+                accounts_data.append({
+                    "account_code": acct,
+                    "gl_transactions": gl_records,
+                    "bank_transactions": bank_records,
+                })
+
             return {
-                "account_code": account_code,
-                "gl_transactions": gl_records,
-                "bank_transactions": bank_records,
+                "account_code": account_code,  # For backward compatibility if single account
+                "accounts_data": accounts_data,
                 "mcp_calls": local_calls,
+                "is_multi_account": len(accounts_data) > 1 or not account_code
             }
 
         if workflow_type == "accrual":
@@ -277,9 +304,40 @@ def _build_production_deps(
     async def run_validation(workflow_type: str, financial_data: Dict[str, Any]) -> Dict[str, Any]:
         """Run deterministic financial math inside financial_engine."""
         if workflow_type == "reconciliation":
-            gl = financial_data.get("gl_transactions", [])
-            bank = financial_data.get("bank_transactions", [])
-            return reconciliation_engine.reconcile(gl_transactions=gl, bank_transactions=bank)
+            accounts_data = financial_data.get("accounts_data", [])
+            # Fallback for old single-account format
+            if not accounts_data and "gl_transactions" in financial_data:
+                accounts_data = [{
+                    "account_code": financial_data.get("account_code"),
+                    "gl_transactions": financial_data.get("gl_transactions", []),
+                    "bank_transactions": financial_data.get("bank_transactions", [])
+                }]
+
+            combined_results = {
+                "matches": [],
+                "unmatched_gl": [],
+                "unmatched_bank": [],
+                "metrics": {
+                    "matched_count": 0,
+                    "matched_amount": 0.0,
+                    "unmatched_gl_count": 0,
+                    "unmatched_bank_count": 0
+                }
+            }
+
+            for acct_data in accounts_data:
+                gl = acct_data.get("gl_transactions", [])
+                bank = acct_data.get("bank_transactions", [])
+                res = reconciliation_engine.reconcile(gl_transactions=gl, bank_transactions=bank)
+                combined_results["matches"].extend(res.get("matches", []))
+                combined_results["unmatched_gl"].extend(res.get("unmatched_gl", []))
+                combined_results["unmatched_bank"].extend(res.get("unmatched_bank", []))
+
+                metrics = res.get("metrics", {})
+                for k in combined_results["metrics"]:
+                    combined_results["metrics"][k] += float(metrics.get(k, 0.0))
+
+            return combined_results
 
         elif workflow_type == "accrual":
             accrual_entries = financial_data.get("accrual_entries", [])
@@ -395,7 +453,7 @@ def _build_production_deps(
                     if not exc_id:
                         continue
                     meta = item.get("metadata") or {}
-                    
+
                     # Extract entity keys from metadata
                     gl_line_id = None
                     bank_tx_id = None
@@ -1393,10 +1451,238 @@ class WorkflowService:
         return summaries
 
 
+    async def get_reconciliation_preview(self, period: str) -> Dict[str, Any]:
+        """
+        Generate a pre-run preview of eligible bank accounts and their transaction volumes
+        for a given financial period.
+        """
+        if self.session_factory is None:
+            raise ObservabilityStorageError("Observability storage unavailable")
+
+        from app.database.models import BankAccount, Account, JournalEntry, JournalLine, BankTransaction, ReconciliationResult
+        from sqlalchemy import func
+
+        try:
+            db = self.session_factory()
+        except Exception as exc:
+            logger.error("Failed to open database session: %s", exc, exc_info=True)
+            raise ObservabilityStorageError("Observability storage unavailable") from exc
+
+        try:
+            # Find eligible bank accounts with linked GL accounts
+            bank_accounts = db.query(BankAccount, Account).join(
+                Account, BankAccount.linked_gl_account_id == Account.id
+            ).filter(
+                BankAccount.is_active == True,
+                Account.is_active == True
+            ).all()
+
+            preview_data = {
+                "period": period,
+                "detected_accounts": [],
+                "total_gl_transactions": 0,
+                "total_bank_transactions": 0,
+                "total_already_reconciled": 0,
+                "missing_account_links": 0,  # Could be calculated by checking BankAccounts without links
+            }
+
+            # Count bank accounts without links
+            unlinked = db.query(BankAccount).filter(
+                BankAccount.linked_gl_account_id == None,
+                BankAccount.is_active == True
+            ).count()
+            preview_data["missing_account_links"] = unlinked
+
+            for bank, gl in bank_accounts:
+                account_code = gl.account_code
+
+                # Handle YYYY vs YYYY-MM for GL
+                if len(period) == 4 and period.isdigit():
+                    gl_count = db.query(JournalLine).join(
+                        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+                    ).filter(
+                        JournalLine.account_id == gl.id,
+                        JournalEntry.fiscal_period.startswith(period)
+                    ).count()
+                else:
+                    gl_count = db.query(JournalLine).join(
+                        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+                    ).filter(
+                        JournalLine.account_id == gl.id,
+                        JournalEntry.fiscal_period == period
+                    ).count()
+
+                # Parse period if YYYY-MM or YYYY
+                bank_count = 0
+                if len(period) == 4 and period.isdigit():
+                    try:
+                        year = int(period)
+                        from datetime import datetime
+                        start_date = datetime(year, 1, 1)
+                        end_date = datetime(year, 12, 31, 23, 59, 59)
+
+                        bank_count = db.query(BankTransaction).filter(
+                            BankTransaction.bank_account_id == bank.id,
+                            BankTransaction.booking_date >= start_date,
+                            BankTransaction.booking_date <= end_date
+                        ).count()
+                    except Exception:
+                        bank_count = db.query(BankTransaction).filter(BankTransaction.bank_account_id == bank.id).count()
+                elif "-" in period:
+                    try:
+                        year, month = map(int, period.split("-")[:2])
+                        from datetime import datetime
+                        import calendar
+                        start_date = datetime(year, month, 1)
+                        end_date = datetime(year, month, calendar.monthrange(year, month)[1], 23, 59, 59)
+
+                        bank_count = db.query(BankTransaction).filter(
+                            BankTransaction.bank_account_id == bank.id,
+                            BankTransaction.booking_date >= start_date,
+                            BankTransaction.booking_date <= end_date
+                        ).count()
+                    except Exception:
+                        bank_count = db.query(BankTransaction).filter(BankTransaction.bank_account_id == bank.id).count()
+                else:
+                    bank_count = db.query(BankTransaction).filter(BankTransaction.bank_account_id == bank.id).count()
+
+                preview_data["detected_accounts"].append({
+                    "account_code": account_code,
+                    "bank_name": bank.bank_name,
+                    "account_name": bank.account_name,
+                    "gl_count": gl_count,
+                    "bank_count": bank_count,
+                    "eligible": (gl_count > 0 or bank_count > 0)
+                })
+
+                preview_data["total_gl_transactions"] += gl_count
+                preview_data["total_bank_transactions"] += bank_count
+
+            return preview_data
+        except Exception as exc:
+            logger.error("Failed to generate preview: %s", exc, exc_info=True)
+            raise ObservabilityStorageError("Observability storage unavailable") from exc
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    def get_unresolved_mappings(self) -> Dict[str, Any]:
+        try:
+            db = self.session_factory()
+            from app.database.models import BankAccount, Account
+            from sqlalchemy import or_
+
+            unresolved = db.query(BankAccount).filter(
+                BankAccount.linked_gl_account_id == None,
+                BankAccount.is_active == True,
+            ).all()
+            results = []
+
+            def serialize_account(account: Account) -> Dict[str, Any]:
+                return {
+                    "id": account.id,
+                    "account_code": account.account_code,
+                    "account_name": account.account_name,
+                    "account_type": account.account_type,
+                    "currency_code": account.currency_code,
+                }
+
+            for bank in unresolved:
+                all_accounts = db.query(Account).filter(
+                    Account.is_active == True,
+                    Account.organization_id == bank.organization_id,
+                ).order_by(Account.account_type.asc(), Account.account_code.asc(), Account.account_name.asc()).all()
+
+                normalized_bank_name = bank.account_name.upper() if bank.account_name else ""
+                suggestions = db.query(Account).filter(
+                    Account.is_active == True,
+                    Account.organization_id == bank.organization_id,
+                    or_(
+                        Account.account_code == bank.account_number_masked,
+                        Account.account_name == bank.bank_name,
+                        Account.account_name == bank.account_name,
+                        Account.normalized_name == normalized_bank_name,
+                    ),
+                ).all()
+
+                if not suggestions:
+                    suggestions = [account for account in all_accounts if account.account_type == "ASSET"][:5]
+
+                display_bank_name = bank.bank_name
+                display_account_name = bank.account_name
+                if (bank.bank_name or "").strip().lower() == "suspense bank":
+                    display_bank_name = "Unmatched Bank Account"
+                if (bank.account_name or "").strip().lower() == "suspense":
+                    display_account_name = "Needs ledger mapping"
+
+                results.append({
+                    "bank_account_id": bank.id,
+                    "bank_name": bank.bank_name,
+                    "account_name": bank.account_name,
+                    "display_bank_name": display_bank_name,
+                    "display_account_name": display_account_name,
+                    "account_number_masked": bank.account_number_masked,
+                    "currency_code": bank.currency_code,
+                    "suggestions": [serialize_account(account) for account in suggestions],
+                    "all_gl_accounts": [serialize_account(account) for account in all_accounts],
+                })
+            return {"unresolved": results}
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    def resolve_mapping(self, bank_account_id: str, gl_account_id: str) -> Dict[str, Any]:
+        try:
+            db = self.session_factory()
+            from app.database.models import Account, BankAccount
+            bank = db.get(BankAccount, bank_account_id)
+            gl_account = db.get(Account, gl_account_id)
+            if not bank:
+                return {"status": "error", "message": "Bank account not found"}
+            if not gl_account or not gl_account.is_active or gl_account.organization_id != bank.organization_id:
+                return {"status": "error", "message": "Selected ledger account was not found"}
+
+            bank.linked_gl_account_id = gl_account_id
+            db.commit()
+            return {"status": "success"}
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    def get_available_periods(self) -> Dict[str, Any]:
+        try:
+            db = self.session_factory()
+            from app.database.models import JournalEntry, BankTransaction
+
+            # Get distinct periods from JournalEntry
+            je_periods = db.query(JournalEntry.fiscal_period).distinct().all()
+            periods = set([p[0] for p in je_periods if p[0]])
+
+            # Get distinct YYYY-MM from BankTransaction booking_date
+            bt_dates = db.query(BankTransaction.booking_date).distinct().all()
+            for d in bt_dates:
+                if d[0]:
+                    periods.add(d[0].strftime("%Y-%m"))
+
+            # Extract yearly periods
+            yearly = set([p.split("-")[0] for p in periods if "-" in p])
+            periods.update(yearly)
+
+            sorted_periods = sorted(list(periods), reverse=True)
+            return {"periods": sorted_periods}
+        finally:
+            try: db.close()
+            except: pass
+
 # ---------------------------------------------------------------------------
 # FastAPI Dependency
 # ---------------------------------------------------------------------------
-
 
 def get_workflow_service(request: Request) -> WorkflowService:
     """Retrieve the singleton WorkflowService stored in app.state during lifespan."""

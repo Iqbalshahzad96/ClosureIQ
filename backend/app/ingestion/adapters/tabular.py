@@ -99,11 +99,17 @@ def physical_rows(content, row_limit=None):
 def parse_table(content, filename, is_header, normalize=normalize_header, classify=None):
     headers = {}
     found = False
+    candidates = []
     for sheet, number, cells, epoch in physical_rows(content):
         if not any(v is not None and str(v).strip() for v in cells):
             continue
         names = [normalize(v) for v in cells]
         metadata = {"filename": filename, "excel_epoch": epoch}
+        
+        non_empty = [n for n in names if n]
+        if len(non_empty) >= 3 or (len(cells) > 0 and len(non_empty) > 0):
+            candidates.append(non_empty)
+
         if is_header(set(names)):
             named = [n for n in names if n]
             if len(named) != len(set(named)):
@@ -117,8 +123,18 @@ def parse_table(content, filename, is_header, normalize=normalize_header, classi
             values = {name: cells[i] if i < len(cells) else None for i, name in headers[sheet].items()}
             role = classify(values) if classify else RowRole.TRANSACTION
             yield RawSourceRow(number, sheet, values, role, metadata)
+            
     if not found:
-        raise ValueError("Required table headers not found")
+        candidates.sort(key=len, reverse=True)
+        top_candidates = candidates[:3]
+        
+        err_msg = "Required table headers not found."
+        if top_candidates:
+            err_msg += f" Candidate rows detected: {', '.join(str(c) for c in top_candidates)}"
+        
+        err = ValueError(err_msg)
+        err.candidates = top_candidates
+        raise err
 
 
 def detects(content, predicate, normalize=normalize_header):

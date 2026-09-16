@@ -249,37 +249,28 @@ class FinancialReviewAgent:
     async def _default_model_callable(
         self, system_instruction: str, user_content: str
     ) -> str:
-        api_key = settings.GEMINI_API_KEY
-        if not api_key:
+        from app.rag.llm import generate_gemini_content
+        
+        try:
+            return await generate_gemini_content(
+                system_instruction=system_instruction,
+                user_content=user_content,
+                response_schema=ModelReviewResponse,
+                response_mime_type="application/json",
+                model_name=self.model_name
+            )
+        except ValueError as exc:
             raise FinancialReviewAgentError(
                 "Gemini model is unavailable because its API key is not configured"
-            ) from ValueError("Gemini API key is not configured")
-
-        try:
-            from google import genai
-            from google.genai import types
+            ) from exc
         except ImportError as exc:
             raise FinancialReviewAgentError(
                 "Gemini model is unavailable because the google-genai SDK is missing"
             ) from exc
-
-        try:
-            client = genai.Client(api_key=api_key)
-            config = types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                response_mime_type="application/json",
-                response_schema=ModelReviewResponse,
-                temperature=0.1,
-            )
-            response = await client.aio.models.generate_content(
-                model=self.model_name,
-                contents=user_content,
-                config=config,
-            )
-            return response.text
         except Exception as exc:
+            api_key = settings.GEMINI_API_KEY or ""
             cause: Exception = exc
-            if api_key in str(exc):
+            if api_key and api_key in str(exc):
                 cause = RuntimeError(str(exc).replace(api_key, "[REDACTED_API_KEY]"))
             raise FinancialReviewAgentError("Gemini model generation failed") from cause
 

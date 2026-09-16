@@ -11,7 +11,7 @@
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1';
 
-export async function uploadPolicyFile({ file, category, policyId, signal }) {
+export async function uploadPolicyFile({ file, category, policyId, docId, signal }) {
   if (!file) {
     throw new Error('Please select a policy document to upload.');
   }
@@ -21,6 +21,7 @@ export async function uploadPolicyFile({ file, category, policyId, signal }) {
   formData.append('file', file);
   if (category) formData.append('category', category);
   if (policyId) formData.append('policy_id', policyId);
+  if (docId) formData.append('doc_id', docId);
 
   const response = await fetch(url, {
     method: 'POST',
@@ -140,6 +141,41 @@ export async function queryPolicyContext({ query, category, topK = 3, signal } =
 
   if (!response.ok) {
     throw new Error(`Policy query failed (${response.status})`);
+  }
+
+  return await response.json();
+}
+
+export async function answerPolicyQuestion({ question, history = [], category, topK = 2, signal } = {}) {
+  if (!question) {
+    throw new Error('question is required');
+  }
+
+  const url = `${BASE_URL}/rag/answer`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      question,
+      history,
+      category: category || null,
+      top_k: Number(topK) || 2,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    let detail = '';
+    try {
+      const data = await response.json();
+      detail = data.detail || '';
+    } catch {
+      detail = await response.text().catch(() => '');
+    }
+    throw new Error(detail || `Policy answer failed (${response.status})`);
   }
 
   return await response.json();

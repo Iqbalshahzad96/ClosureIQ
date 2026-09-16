@@ -50,12 +50,20 @@ class EnquestLedgerAdapter(BaseAdapter):
         return {"voucher_date", "voucher_type", "debit_amount", "credit_amount"} <= names
 
     def parse_file(self, file_bytes, filename, options=None):
-        if not file_bytes.startswith((b"PK", bytes.fromhex("d0cf11e0a1b11ae1"))):
-            raise ValueError("Expected an Excel ledger")
-        for row in parse_table(file_bytes, filename, self._is_header,
-                               self._normalize_column_name, self._classify_row):
-            row.metadata["account_name_raw"] = self._extract_account_name(filename)
-            yield row
+        from app.ingestion.adapters.metadata import extract_title_metadata
+        try:
+            for row in parse_table(file_bytes, filename, self._is_header,
+                                   self._normalize_column_name, self._classify_row):
+                if row.role == RowRole.TITLE and options is not None:
+                    extract_title_metadata(row.raw_values.get("title", []), options)
+                    continue
+                row.metadata["account_name_raw"] = (options.get("account_name_raw") if options else None) or self._extract_account_name(filename)
+                yield row
+        except ValueError as exc:
+            if hasattr(exc, "candidates"):
+                msg = f"Missing required columns: Voucher Date, Voucher Type, Debit Amount, Credit Amount. Closest header found was: {exc.candidates[0] if exc.candidates else 'None'}"
+                raise ValueError(msg) from exc
+            raise
 
     def map_to_canonical(
         self, raw_rows: List[RawSourceRow], options: Optional[Dict[str, Any]] = None

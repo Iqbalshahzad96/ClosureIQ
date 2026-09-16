@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.rag.vectorstore import VectorStoreManager
 from app.rag.ingestion import PolicyDocumentIngester
 from app.rag.retriever import PolicyRetriever
@@ -59,6 +60,25 @@ class RAGQueryResponse(BaseModel):
     formatted_context: str
 
 
+class ChatHistoryMessage(BaseModel):
+    role: str = Field(..., description="Message role: user or assistant")
+    content: str = Field(..., description="Message content")
+
+
+class RAGAnswerRequest(BaseModel):
+    question: str = Field(..., description="User's policy question")
+    history: List[ChatHistoryMessage] = Field(default_factory=list)
+    top_k: int = Field(default=2, ge=1, le=10)
+    category: Optional[str] = Field(default=None)
+
+
+class RAGAnswerResponse(BaseModel):
+    answer: str
+    citations: List[Dict[str, Any]]
+    retrieved_count: int
+    model: str
+
+
 class IngestTextRequest(BaseModel):
     doc_id: str = Field(..., description="Unique document identifier")
     text: str = Field(..., description="Policy document text or markdown")
@@ -97,6 +117,87 @@ async def query_policies(
     )
 
 
+@router.post("/answer", response_model=RAGAnswerResponse)
+async def answer_policy_question(
+    payload: RAGAnswerRequest,
+    retriever: PolicyRetriever = Depends(get_retriever),
+) -> RAGAnswerResponse:
+    """Generate a chatbot-style answer grounded in retrieved policy documents."""
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question is required.")
+
+    evidence = await retriever.retrieve_policy_context(
+        query=question,
+        top_k=payload.top_k,
+        category=payload.category,
+    )
+    if not evidence:
+        return RAGAnswerResponse(
+            answer="I could not find relevant policy content in ChromaDB for that question.",
+            citations=[],
+            retrieved_count=0,
+            model=settings.GEMINI_MODEL,
+        )
+
+    from app.rag.llm import generate_gemini_content, format_chat_history
+
+    history_lines_str = format_chat_history(payload.history[-4:])
+
+    context = retriever.format_context_for_prompt(evidence)
+    system_instruction = (
+        "You are a Policy & SOP assistant for ClosureIQ. Answer the user's question "
+        "using only the supplied policy evidence and conversation history. If the "
+        "evidence does not answer the question, say that clearly. Keep the answer "
+        "concise and cite policy IDs or section names from the evidence."
+    )
+    user_content = (
+        "Conversation history:\n"
+        f"{history_lines_str}\n\n"
+        "Policy evidence:\n"
+        f"{context}\n\n"
+        "User question:\n"
+        f"{question}"
+    )
+
+    try:
+        answer = await generate_gemini_content(
+            system_instruction=system_instruction,
+            user_content=user_content,
+        )
+        answer = answer.strip()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini model is unavailable because its API key is not configured.",
+        ) from exc
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gemini model is unavailable because the google-genai SDK is missing.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini model generation failed.",
+        ) from exc
+
+    return RAGAnswerResponse(
+        answer=answer or "No answer was generated.",
+        citations=[
+            {
+                "citation": item.get("citation"),
+                "policy_id": item.get("policy_id"),
+                "policy_name": item.get("policy_name"),
+                "category": item.get("category"),
+            }
+            for item in evidence
+        ],
+        retrieved_count=len(evidence),
+        model=settings.GEMINI_MODEL,
+    )
+
+
 @router.post("/ingest/text")
 async def ingest_policy_text(
     payload: IngestTextRequest,
@@ -123,6 +224,7 @@ async def upload_policy_file(
     file: UploadFile = File(...),
     category: Optional[str] = Form(default=None),
     policy_id: Optional[str] = Form(default=None),
+    doc_id: Optional[str] = Form(default=None),
     ingester: PolicyDocumentIngester = Depends(get_ingester),
 ) -> Dict[str, Any]:
     """Ingest an uploaded policy document (.md, .txt, .pdf, .docx) into ChromaDB."""
@@ -132,7 +234,7 @@ async def upload_policy_file(
         raise HTTPException(status_code=400, detail="Uploaded policy file is empty.")
 
     ext = os.path.splitext(filename)[1].lower()
-    doc_id = policy_id or os.path.splitext(filename)[0].lower().replace(" ", "_")
+    resolved_doc_id = doc_id or policy_id or os.path.splitext(filename)[0].lower().replace(" ", "_")
     meta_override: Dict[str, Any] = {}
     if category:
         meta_override["category"] = category
@@ -158,7 +260,7 @@ async def upload_policy_file(
 
     res = ingester.ingest_text(
         text=text,
-        doc_id=doc_id,
+        doc_id=resolved_doc_id,
         filename=filename,
         metadata_override=meta_override,
     )

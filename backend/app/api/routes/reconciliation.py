@@ -161,15 +161,15 @@ class ReconciliationRunRequest(BaseRunRequest):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     workflow_type: Literal["reconciliation"] = "reconciliation"
-    account_code: str = Field(..., description="GL account code for reconciliation")
-    limit: int = Field(default=50, ge=1, le=100, description="Max transactions to query (1-100)")
+    account_code: Optional[str] = Field(default=None, description="Optional GL account code. If omitted, runs for all eligible accounts.")
+    limit: int = Field(default=50, ge=1, le=100, description="Max transactions to query per account (1-100)")
 
     @field_validator("account_code")
     @classmethod
-    def validate_account_code(cls, v: str) -> str:
-        if not v or not v.strip():
+    def validate_account_code(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
             raise ValueError("account_code cannot be blank or whitespace.")
-        return v.strip()
+        return v.strip() if v is not None else None
 
 
 class AccrualRunRequest(BaseRunRequest):
@@ -363,6 +363,72 @@ async def run_reconciliation(
         )
 
 
+@router.get("/preview", response_model=Dict[str, Any])
+async def get_reconciliation_preview(
+    period: str = Query(..., description="Financial close period (e.g., YYYY-MM)"),
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> Dict[str, Any]:
+    """
+    Retrieve a pre-run preview of eligible bank accounts and their transaction volumes.
+    """
+    try:
+        return await workflow_service.get_reconciliation_preview(period)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Preview generation failed: {exc}",
+        )
+
+
+def _enrich_reconciliation_summary(run_state: Dict[str, Any]) -> Dict[str, Any]:
+    if run_state.get("workflow_type") == "reconciliation":
+        val_res = run_state.get("validation_results") or {}
+        metrics = val_res.get("metrics") or {}
+        
+        matched_count = metrics.get("matched_count", 0)
+        unmatched_gl = metrics.get("unmatched_gl_count", 0)
+        unmatched_bank = metrics.get("unmatched_bank_count", 0)
+        
+        total_transactions = matched_count * 2 + unmatched_gl + unmatched_bank
+        matched_percentage = (matched_count * 2 / total_transactions * 100) if total_transactions > 0 else 0
+        
+        exceptions = run_state.get("exceptions", [])
+        hitl_pending = sum(1 for e in exceptions if e.get("status") == "OPEN")
+        approved = sum(1 for e in exceptions if e.get("status") == "APPROVED")
+        rejected = sum(1 for e in exceptions if e.get("status") == "REJECTED")
+        
+        final_matched_count = matched_count + approved
+        final_percentage = (final_matched_count * 2 / total_transactions * 100) if total_transactions > 0 else 0
+        
+        run_state["summary_metrics"] = {
+            "matched_count": matched_count,
+            "matched_percentage": round(matched_percentage, 2),
+            "unmatched_gl_count": unmatched_gl,
+            "unmatched_bank_count": unmatched_bank,
+            "exceptions_count": len(exceptions),
+            "hitl_pending_count": hitl_pending,
+            "approved_count": approved,
+            "rejected_count": rejected,
+            "final_reconciled_percentage": round(final_percentage, 2)
+        }
+    return run_state
+
+class ResolveMappingRequest(BaseModel):
+    bank_account_id: str
+    gl_account_id: str
+
+@router.get("/unresolved-mappings")
+async def get_unresolved_mappings(workflow_service: WorkflowService = Depends(get_workflow_service)):
+    return workflow_service.get_unresolved_mappings()
+
+@router.post("/resolve-mapping")
+async def resolve_mapping(req: ResolveMappingRequest, workflow_service: WorkflowService = Depends(get_workflow_service)):
+    return workflow_service.resolve_mapping(req.bank_account_id, req.gl_account_id)
+
+@router.get("/periods")
+async def get_available_periods(workflow_service: WorkflowService = Depends(get_workflow_service)):
+    return workflow_service.get_available_periods()
+
 @router.get("/summary", response_model=Dict[str, Any])
 async def get_reconciliation_summary(
     run_id: Optional[str] = Query(default=None, description="Optional run ID to query state for"),
@@ -378,14 +444,14 @@ async def get_reconciliation_summary(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Run '{run_id}' not found",
             )
-        return run_state
+        return _enrich_reconciliation_summary(run_state)
 
     # Return latest run or default summary
     if workflow_service._runs:
         latest_run_id = list(workflow_service._runs.keys())[-1]
         latest_state = await workflow_service.get_run_state(latest_run_id)
         if latest_state:
-            return latest_state
+            return _enrich_reconciliation_summary(latest_state)
 
     return {
         "status": "idle",

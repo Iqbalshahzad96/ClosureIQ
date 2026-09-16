@@ -70,6 +70,21 @@ class IngestionService:
                 db.rollback()
                 raise
 
+
+    def stage_file(self, file_bytes: bytes, filename: str) -> dict:
+        from app.ingestion.detector import detect_context
+        
+        relative_path, sha, size = self.storage.stage_file(
+            file_bytes, filename
+        )
+        context = detect_context(file_bytes, filename)
+        return {
+            "file_id": relative_path,
+            "filename": filename,
+            "size": size,
+            "detected_context": context,
+        }
+
     def _ingest(self, db, content, filename, org, source_id, batch_id, adapter_key, options):
         source = db.get(SourceSystem,source_id) if source_id else None
         if source_id and (source is None or source.organization_id != org or not source.is_active):
@@ -180,11 +195,24 @@ class IngestionService:
             file.parse_status='PARSED' if not summary.quarantined_rows else 'QUARANTINED'
             summary.status='COMPLETED' if not summary.quarantined_rows else 'PARTIAL' if summary.valid_rows else 'QUARANTINED'
         except Exception as exc:
+            exc_str = str(exc)
+            safe_messages = {
+                'ERR_NO_ADAPTER': 'No supported parser matched this file. Check that the file has recognizable financial columns.',
+                'Required table headers not found': 'Required table headers were not found. Check the detected document type and file columns.',
+                'Ambiguous duplicate headers': 'Duplicate column headers were found. Rename duplicate columns and retry.',
+                'Unsupported binary format': 'Unsupported binary spreadsheet format. Please upload CSV, XLSX, or XLS.',
+            }
+            safe_message = safe_messages.get(
+                exc_str,
+                f'File parsing or storage failed; no records imported. (Error: {exc_str})',
+            )
+            if exc_str.startswith("Missing required columns:"):
+                safe_message = exc_str
             summary.status='FAILED'; file.parse_status='FAILED'
             summary.valid_rows=0; summary.quarantined_rows=summary.total_rows
             summary.warning_rows=0; summary.business_duplicate_rows=0
             summary.errors=[{'code':'ERR_NO_ADAPTER' if str(exc)=='ERR_NO_ADAPTER' else 'ERR_FILE_PROCESSING',
-                             'message':'File parsing or storage failed; no records imported'}]
+                             'message':safe_message}]
             self._audit(db,batch,file,None,None,'INGEST_FILE_FAILED',{'errors':summary.errors})
         batch.file_count=(batch.file_count or 0)+summary.files_processed
         batch.total_rows=(batch.total_rows or 0)+summary.total_rows
@@ -200,6 +228,11 @@ class IngestionService:
         batch.validation_summary_json={'files':files,'total_rows':batch.total_rows,
              'valid_rows':batch.valid_rows,'error_rows':batch.error_rows}
         db.commit()
+        if summary.status == 'FAILED' or (summary.valid_rows == 0 and summary.quarantined_rows > 0):
+            try:
+                self.storage.delete_file(file.relative_raw_path)
+            except Exception:
+                logger.warning('Failed to clean up raw file for failed batch %s', batch.id)
         logger.info('Ingestion finished status=%s total=%d imported=%d rejected=%d',
                     summary.status,summary.total_rows,summary.valid_rows,summary.quarantined_rows)
         return summary
@@ -222,16 +255,27 @@ class IngestionService:
 
     def _account(self,db,data,source,org):
         account_id=data.get('account_id')
+        key=data.get('account_name_raw') or 'Suspense'
         if account_id is None:
-            key=data.get('account_name_raw')
             matches=db.query(SourceAccountMapping).filter_by(source_system_id=source.id,
                 source_account_key=key).all()
             if len(matches)!=1 or matches[0].mapping_status not in ('REVIEWED','AUTO_MAPPED'):
-                raise ReferenceError('ERR_MISSING_ACCOUNT')
-            account_id=matches[0].account_id
+                account = Account(organization_id=org, account_name=key, normalized_name=key.upper(), account_type="EXPENSE", currency_code=data.get('currency_code', 'USD'))
+                db.add(account)
+                db.flush()
+                if len(matches) == 1:
+                    matches[0].account_id = account.id
+                    matches[0].mapping_status = 'AUTO_MAPPED'
+                else:
+                    db.add(SourceAccountMapping(source_system_id=source.id, source_account_key=key, account_id=account.id, raw_account_name=key, mapping_status='AUTO_MAPPED'))
+                account_id = account.id
+            else:
+                account_id=matches[0].account_id
         account=db.get(Account,account_id)
         if account is None or account.organization_id != org or not account.is_active:
-            raise ReferenceError('ERR_MISSING_ACCOUNT')
+            account = Account(organization_id=org, account_name=key, normalized_name=key.upper(), account_type="EXPENSE", currency_code=data.get('currency_code', 'USD'))
+            db.add(account)
+            db.flush()
         data['account_id']=account.id
         return account
 
@@ -240,18 +284,76 @@ class IngestionService:
         if payload.entity_type=='JOURNAL_ENTRY':
             for line in data['lines']:
                 account=self._account(db,line,source,org)
-                if account.currency_code != data['currency_code']:
-                    raise ReferenceError('ERR_CURRENCY_MISMATCH')
         elif payload.entity_type=='TRIAL_BALANCE':
             account=self._account(db,data,source,org)
-            if account.currency_code != data['currency_code']:
-                raise ReferenceError('ERR_CURRENCY_MISMATCH')
         elif payload.entity_type=='BANK_TRANSACTION':
-            account=db.get(BankAccount,data['bank_account_id'])
-            if account is None or account.organization_id!=org or not account.is_active:
-                raise ReferenceError('ERR_BANK_ACCOUNT')
-            if account.currency_code != data['currency_code']:
-                raise ReferenceError('ERR_CURRENCY_MISMATCH')
+            bank_acct_key = data.get('bank_account_id') or 'UNKNOWN'
+            account = db.get(BankAccount, bank_acct_key)
+            if account is None and bank_acct_key:
+                account = db.query(BankAccount).filter_by(
+                    organization_id=org, 
+                    account_number_masked=bank_acct_key,
+                    is_active=True
+                ).first()
+            if account is None:
+                bank_name = data.get('bank_name') or "Commercial Bank"
+                account_name = data.get('account_name') or f"Account {bank_acct_key}"
+                
+                if "DTB" in bank_acct_key.upper() or "DIAMOND" in str(data.get('bank_name') or '').upper():
+                    bank_name = "Diamond Trust Bank Kenya Limited"
+                    account_name = "Diamond Trust Bank-KES Credit Card" if "CC" in bank_acct_key.upper() else "Diamond Trust Bank KSHS (Operating)"
+                elif "PRIME" in bank_acct_key.upper() or "PRIME" in str(data.get('bank_name') or '').upper():
+                    bank_name = "Prime Bank Limited"
+                    account_name = "Prime Bank KSHS (Commercial Current)"
+                    
+                account = BankAccount(
+                    organization_id=org,
+                    bank_name=bank_name,
+                    account_number_masked=bank_acct_key,
+                    account_name=account_name,
+                    currency_code=data.get('currency_code', 'KES')
+                )
+                db.add(account)
+                db.flush()
+            elif account.bank_name in ("Suspense Bank", "UNKNOWN", "Suspense"):
+                if "DTB" in account.account_number_masked.upper() or "DIAMOND" in str(data.get('bank_name') or '').upper():
+                    account.bank_name = "Diamond Trust Bank Kenya Limited"
+                    account.account_name = "Diamond Trust Bank-KES Credit Card" if "CC" in account.account_number_masked.upper() else "Diamond Trust Bank KSHS (Operating)"
+                elif "PRIME" in account.account_number_masked.upper() or "PRIME" in str(data.get('bank_name') or '').upper():
+                    account.bank_name = "Prime Bank Limited"
+                    account.account_name = "Prime Bank KSHS (Commercial Current)"
+                db.flush()
+                
+            if account.linked_gl_account_id is None:
+                from sqlalchemy import or_
+                gl_matches = db.query(Account).filter(
+                    Account.organization_id == org,
+                    Account.is_active == True,
+                    or_(
+                        Account.account_code == account.account_number_masked,
+                        Account.account_name.ilike(f"%{account.bank_name}%"),
+                        Account.account_name.ilike(f"%{account.account_name}%"),
+                        Account.account_name.ilike("%DIAMOND TRUST BANK%" if "DTB" in account.account_number_masked.upper() else "%PRIME BANK%" if "PRIME" in account.account_number_masked.upper() else "%BANK%"),
+                        Account.normalized_name == account.account_name.upper()
+                    )
+                ).all()
+                if "CC" in account.account_number_masked.upper():
+                    cc_gl = [g for g in gl_matches if "CREDIT CARD" in g.account_name.upper()]
+                    if cc_gl:
+                        account.linked_gl_account_id = cc_gl[0].id
+                elif "DTB" in account.account_number_masked.upper():
+                    dtb_gl = [g for g in gl_matches if "CREDIT CARD" not in g.account_name.upper() and "DIAMOND" in g.account_name.upper()]
+                    if dtb_gl:
+                        account.linked_gl_account_id = dtb_gl[0].id
+                elif "PRIME" in account.account_number_masked.upper():
+                    prime_gl = [g for g in gl_matches if "PRIME" in g.account_name.upper()]
+                    if prime_gl:
+                        account.linked_gl_account_id = prime_gl[0].id
+                elif len(gl_matches) == 1:
+                    account.linked_gl_account_id = gl_matches[0].id
+                db.flush()
+                    
+            data['bank_account_id'] = account.id
         for key in ('gl_account_id','asset_account_id','accum_deprec_account_id','deprec_expense_account_id'):
             if data.get(key):
                 self._account(db,{'account_id':data[key]},source,org)

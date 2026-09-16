@@ -70,39 +70,24 @@ export function getContentTypeForFile(filename) {
 /**
  * Uploads a financial document as raw bytes to the ingestion endpoint.
  */
-export async function uploadFinancialFile({
-  file,
-  documentType,
-  financeOptions = {},
-  signal,
-}) {
+export async function stageFinancialFile({ file, signal }) {
   // 1. Client-side preflight validation
   const validationError = validateFileClientSide(file);
   if (validationError) {
     throw new Error(validationError);
   }
 
-  // 2. Resolve document type adapter config
-  const config = getDocumentTypeConfig(documentType);
-
-  // 3. Build query parameters safely
+  // 2. Build query parameters safely
   const queryParams = new URLSearchParams();
   queryParams.set('filename', file.name);
-  queryParams.set('adapter_key', config.adapterKey);
 
-  // 4. Build headers
-  const importOptions = buildImportOptions(documentType, financeOptions);
+  // 3. Build headers
   const contentType = getContentTypeForFile(file.name);
-
-  const url = `${BASE_URL}/imports/upload?${queryParams.toString()}`;
+  const url = `${BASE_URL}/imports/stage?${queryParams.toString()}`;
 
   const requestOptions = {
     method: 'POST',
-    headers: {
-      'Content-Type': contentType,
-      'X-Import-Options': JSON.stringify(importOptions),
-    },
-    // Raw file bytes sent as the body directly—never FormData and never JSON
+    headers: { 'Content-Type': contentType },
     body: file,
     signal,
   };
@@ -111,13 +96,10 @@ export async function uploadFinancialFile({
   try {
     response = await fetch(url, requestOptions);
   } catch (err) {
-    if (err.name === 'AbortError') {
-      throw err;
-    }
+    if (err.name === 'AbortError') throw err;
     throw new Error('Unable to connect to the server. Please check your network and try again.');
   }
 
-  // 5. Handle HTTP status codes
   if (!response.ok) {
     let errorText = '';
     try {
@@ -125,29 +107,145 @@ export async function uploadFinancialFile({
     } catch {
       errorText = '';
     }
-
-    if (response.status === 413) {
-      throw new Error('File exceeds the 25 MiB upload limit.');
-    }
-    if (response.status === 422) {
-      throw new Error('Invalid import options provided for this document type.');
-    }
+    if (response.status === 413) throw new Error('File exceeds the 25 MiB upload limit.');
     if (response.status === 400) {
       const sanitized = sanitizeDiagnosticMessage(errorText);
-      throw new Error(`File validation failed: ${sanitized}`);
+      throw new Error(`File staging failed: ${sanitized}`);
     }
-    // Generic sanitized error for 500 and other unexpected status codes
-    throw new Error('The server could not complete the import. Please check the file and try again.');
+    throw new Error('The server could not stage the file. Please check the file and try again.');
   }
 
-  // 6. Parse and normalize response JSON
   let data;
   try {
     data = await response.json();
   } catch {
     throw new Error('The server returned an unreadable response. Please retry.');
   }
+  return data;
+}
 
+export async function confirmFinancialFile({
+  fileId,
+  filename,
+  documentType,
+  financeOptions = {},
+  signal,
+}) {
+  const config = getDocumentTypeConfig(documentType);
+  const importOptions = buildImportOptions(documentType, financeOptions);
+
+  const url = `${BASE_URL}/imports/confirm?adapter_key=${config.adapterKey}`;
+
+  const requestOptions = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      file_id: fileId,
+      filename: filename,
+      options: importOptions,
+    }),
+    signal,
+  };
+
+  let response;
+  try {
+    response = await fetch(url, requestOptions);
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    throw new Error('Unable to connect to the server. Please check your network and try again.');
+  }
+
+  if (!response.ok) {
+    let errorText = '';
+    try {
+      errorText = await response.text();
+    } catch {
+      errorText = '';
+    }
+    if (response.status === 404) throw new Error('Staged file not found. Please upload again.');
+    if (response.status === 422) throw new Error('Invalid import options provided.');
+    if (response.status === 400) {
+      const sanitized = sanitizeDiagnosticMessage(errorText);
+      throw new Error(`File validation failed: ${sanitized}`);
+    }
+    throw new Error('The server could not complete the import. Please check the file and try again.');
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('The server returned an unreadable response. Please retry.');
+  }
+  return normalizeImportResponse(data);
+}
+
+/**
+ * Direct single-step upload for automated scripts and compatibility tests.
+ */
+export async function uploadFinancialFile({
+  file,
+  documentType,
+  financeOptions = {},
+  signal,
+}) {
+  const validationError = validateFileClientSide(file);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+
+  const config = getDocumentTypeConfig(documentType);
+  const importOptions = buildImportOptions(documentType, financeOptions);
+
+  const queryParams = new URLSearchParams();
+  queryParams.set('filename', file.name);
+  if (config.adapterKey) {
+    queryParams.set('adapter_key', config.adapterKey);
+  }
+
+  const contentType = getContentTypeForFile(file.name);
+  const url = `${BASE_URL}/imports/upload?${queryParams.toString()}`;
+
+  const requestOptions = {
+    method: 'POST',
+    headers: {
+      'Content-Type': contentType,
+      'X-Import-Options': JSON.stringify(importOptions),
+    },
+    body: file,
+    signal,
+  };
+
+  let response;
+  try {
+    response = await fetch(url, requestOptions);
+  } catch (err) {
+    if (err.name === 'AbortError') throw err;
+    throw new Error('Unable to connect to the server. Please check your network and try again.');
+  }
+
+  if (!response.ok) {
+    let errorText = '';
+    try {
+      errorText = await response.text();
+    } catch {
+      errorText = '';
+    }
+    if (response.status === 413) throw new Error('The selected file exceeds the 25 MiB upload limit.');
+    if (response.status === 422) throw new Error('Invalid import options provided.');
+    if (response.status === 400) {
+      const sanitized = sanitizeDiagnosticMessage(errorText);
+      throw new Error(`File validation failed: ${sanitized}`);
+    }
+    throw new Error('The server could not complete the import. Please check the file and try again.');
+  }
+
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('The server returned an unreadable response. Please retry.');
+  }
   return normalizeImportResponse(data);
 }
 

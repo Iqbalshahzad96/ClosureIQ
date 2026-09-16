@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import PoliciesPage from '../PoliciesPage';
 
@@ -45,6 +45,16 @@ describe('PoliciesPage', () => {
           json: async () => mockDocumentsPayload,
         });
       }
+      if (String(url).includes('/rag/answer')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            answer: 'Accruals should be reviewed under ACC-002.',
+            citations: [{ citation: '[ACC-002] Accrual & Expense Matching' }],
+          }),
+        });
+      }
       return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
     });
   });
@@ -62,7 +72,7 @@ describe('PoliciesPage', () => {
 
     // Wait for documents to load
     await waitFor(() => {
-      expect(screen.getByText(/Indexed Policy & SOP Documents \(2\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/Current Policy Files \(2\)/i)).toBeInTheDocument();
     });
 
     // Check that ACC-001 and ACC-002 appear in table
@@ -87,7 +97,7 @@ describe('PoliciesPage', () => {
     render(<PoliciesPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Indexed Policy & SOP Documents \(2\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/Current Policy Files \(2\)/i)).toBeInTheDocument();
     });
     expect(screen.getByText('Bank Reconciliation Standard')).toBeInTheDocument();
   });
@@ -107,8 +117,8 @@ describe('PoliciesPage', () => {
     render(<PoliciesPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Indexed Policy & SOP Documents \(0\)/i)).toBeInTheDocument();
-      expect(screen.getByText(/No policy documents indexed in ChromaDB yet/i)).toBeInTheDocument();
+      expect(screen.getByText(/Current Policy Files \(0\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/No policy files found/i)).toBeInTheDocument();
     });
   });
 
@@ -127,7 +137,7 @@ describe('PoliciesPage', () => {
     render(<PoliciesPage />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Indexed Policy & SOP Documents \(2\)/i)).toBeInTheDocument();
+      expect(screen.getByText(/Current Policy Files \(2\)/i)).toBeInTheDocument();
     });
     expect(screen.getByText('partial-doc')).toBeInTheDocument();
   });
@@ -149,5 +159,76 @@ describe('PoliciesPage', () => {
     await waitFor(() => {
       expect(screen.getByText(/Failed to fetch policy documents/i)).toBeInTheDocument();
     });
+  });
+
+  it('updates an existing policy file using the document id', async () => {
+    render(<PoliciesPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Current Policy Files \(2\)/i)).toBeInTheDocument();
+    });
+
+    const updatedFile = new File(['# Updated ACC-002 policy'], 'ACC-002_updated.md', {
+      type: 'text/markdown',
+    });
+    const updateButtons = screen.getAllByRole('button', { name: /update/i });
+    fireEvent.click(updateButtons[1]);
+
+    const fileInputs = document.querySelectorAll('input[type="file"]');
+    fireEvent.change(fileInputs[2], { target: { files: [updatedFile] } });
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/rag/upload'),
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+
+    const uploadCall = global.fetch.mock.calls.find(([url, options]) => (
+      String(url).includes('/rag/upload') && options?.method === 'POST'
+    ));
+    const formData = uploadCall[1].body;
+    expect(formData.get('doc_id')).toBe('acc_002_accrual_policy');
+    expect(formData.get('policy_id')).toBe('ACC-002');
+    expect(formData.get('category')).toBe('ACCRUAL');
+    expect(formData.get('file')).toBe(updatedFile);
+  });
+
+  it('shows generated policy answers and sends chat history on follow-up questions', async () => {
+    render(<PoliciesPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Current Policy Files \(2\)/i)).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText(/What is the accrual threshold/i);
+    fireEvent.change(input, { target: { value: 'How should accruals be reviewed?' } });
+    fireEvent.click(screen.getByRole('button', { name: /ask policy question/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Accruals should be reviewed under ACC-002.')).toBeInTheDocument();
+    });
+    expect(screen.getByText('[ACC-002] Accrual & Expense Matching')).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: 'What about follow up?' } });
+    fireEvent.click(screen.getByRole('button', { name: /ask policy question/i }));
+
+    await waitFor(() => {
+      const answerCalls = global.fetch.mock.calls.filter(([url]) => String(url).includes('/rag/answer'));
+      expect(answerCalls).toHaveLength(2);
+    });
+
+    const secondAnswerCall = global.fetch.mock.calls.filter(([url]) => String(url).includes('/rag/answer'))[1];
+    const payload = JSON.parse(secondAnswerCall[1].body);
+    expect(payload.question).toBe('What about follow up?');
+    expect(payload.top_k).toBe(2);
+    expect(payload.history).toEqual([
+      { role: 'user', content: 'How should accruals be reviewed?' },
+      {
+        role: 'assistant',
+        content: 'Accruals should be reviewed under ACC-002.',
+        citations: [{ citation: '[ACC-002] Accrual & Expense Matching' }],
+      },
+    ]);
   });
 });

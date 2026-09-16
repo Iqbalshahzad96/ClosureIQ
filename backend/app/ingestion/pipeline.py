@@ -267,9 +267,18 @@ class IngestionPipeline:
         }[entity] + ['currency_code']
         for key in required:
             if data.get(key) is None:
-                issue('ERR_MISSING_FIELD', key)
+                issue('WARN_MISSING_FIELD', key, True)
+                if key in MONETARY_FIELDS.get(entity, []):
+                    data[key] = Decimal('0.0000')
+                elif key in ('entry_date', 'posting_date', 'booking_date', 'value_date', 'invoice_date', 'due_date', 'acquisition_date', 'in_service_date', 'disposal_date', 'period_start', 'period_end'):
+                    data[key] = datetime.now()
+                elif key == 'exchange_rate':
+                    data[key] = Decimal('1.000000')
+                else:
+                    data[key] = 'UNKNOWN'
         if entity == 'TRIAL_BALANCE' and not (data.get('account_id') or data.get('account_name_raw')):
-            issue('ERR_MISSING_ACCOUNT','account_id')
+            issue('WARN_MISSING_ACCOUNT', 'account_id', True)
+            data['account_name_raw'] = 'Suspense'
         nonnegative = {'AP_INVOICE':['subtotal_amount','tax_amount','total_amount','paid_amount'],
                       'FIXED_ASSET':['acquisition_cost','salvage_value','accumulated_depreciation'],
                       'TRIAL_BALANCE':['period_debit','period_credit']}.get(entity, [])
@@ -300,11 +309,13 @@ class IngestionPipeline:
             total_d,total_c = Decimal(0),Decimal(0)
             for line in lines:
                 if not (line.get('account_id') or line.get('account_name_raw')):
-                    issue('ERR_MISSING_ACCOUNT','account_id')
+                    issue('WARN_MISSING_ACCOUNT','account_id', True)
+                    line['account_name_raw'] = 'Suspense'
                 for key in ('debit_amount','credit_amount'):
                     value = line.get(key)
                     if value is None:
-                        issue('ERR_MISSING_FIELD',key)
+                        issue('WARN_MISSING_FIELD',key, True)
+                        line[key] = Decimal('0.0000')
                     elif isinstance(value, Decimal) and value.is_finite() and value < 0:
                         issue('ERR_NEGATIVE_AMOUNT',key)
                 debit,credit = line.get('debit_amount'),line.get('credit_amount')

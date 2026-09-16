@@ -38,26 +38,34 @@ class EnquestTBAdapter(BaseAdapter):
         return detects(file_bytes, self._is_header, self._normalize_col)
 
     def parse_file(self, file_bytes, filename, options=None):
-        if not file_bytes.startswith((b"PK", bytes.fromhex("d0cf11e0a1b11ae1"))):
-            raise ValueError("Expected an Excel trial balance")
+        from app.ingestion.adapters.metadata import extract_title_metadata
         def classify(values):
             label = str(values.get("account") or "").strip().lower()
             return RowRole.TOTAL if label in ("total", "grand total", "all account", "all accounts") else RowRole.TRANSACTION
         # Enquest report hierarchy uses indentation. Retain parent controls separately
         # rather than double-counting them alongside the child account balances.
         previous = None
-        for row in parse_table(file_bytes, filename, self._is_header, self._normalize_col, classify):
+        try:
+            for row in parse_table(file_bytes, filename, self._is_header, self._normalize_col, classify):
+                if row.role == RowRole.TITLE and options is not None:
+                    extract_title_metadata(row.raw_values.get("title", []), options)
+                    continue
+                if previous is not None:
+                    before = str(previous.raw_values.get("account") or "")
+                    after = str(row.raw_values.get("account") or "")
+                    if (previous.role == RowRole.TRANSACTION and row.role == RowRole.TRANSACTION
+                            and previous.sheet_name == row.sheet_name
+                            and len(after) - len(after.lstrip()) > len(before) - len(before.lstrip())):
+                        previous.role = RowRole.SUBTOTAL
+                    yield previous
+                previous = row
             if previous is not None:
-                before = str(previous.raw_values.get("account") or "")
-                after = str(row.raw_values.get("account") or "")
-                if (previous.role == RowRole.TRANSACTION and row.role == RowRole.TRANSACTION
-                        and previous.sheet_name == row.sheet_name
-                        and len(after) - len(after.lstrip()) > len(before) - len(before.lstrip())):
-                    previous.role = RowRole.SUBTOTAL
                 yield previous
-            previous = row
-        if previous is not None:
-            yield previous
+        except ValueError as exc:
+            if hasattr(exc, "candidates"):
+                msg = f"Missing required columns: Account, Opening, Debit, Credit, Closing. Closest header found was: {exc.candidates[0] if exc.candidates else 'None'}"
+                raise ValueError(msg) from exc
+            raise
 
     def map_to_canonical(
         self, raw_rows: List[RawSourceRow], options: Optional[Dict[str, Any]] = None

@@ -8,35 +8,38 @@ import {
   FileText,
   CheckCircle2,
   AlertCircle,
-  Layers,
   Sparkles,
-  HelpCircle,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import {
   uploadPolicyFile,
   fetchPolicyDocuments,
   deletePolicyDocument,
-  queryPolicyContext,
+  answerPolicyQuestion,
 } from '../services/policyService';
 
 export default function PoliciesPage() {
   const [documents, setDocuments] = useState([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [updatingId, setUpdatingId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [expandedDocIds, setExpandedDocIds] = useState(() => new Set());
   const [selectedFile, setSelectedFile] = useState(null);
   const [category, setCategory] = useState('RECONCILIATION');
   const [policyId, setPolicyId] = useState('');
   const [uploadSuccess, setUploadSuccess] = useState(null);
   const [error, setError] = useState(null);
 
-  // Semantic query state
+  // Policy chat state
   const [searchQuery, setSearchQuery] = useState('');
   const [queryCategory, setQueryCategory] = useState('');
-  const [queryResults, setQueryResults] = useState(null);
+  const [chatMessages, setChatMessages] = useState([]);
   const [querying, setQuerying] = useState(false);
 
   const fileInputRef = useRef(null);
+  const updateInputRefs = useRef({});
 
   const loadDocuments = async () => {
     setLoadingDocs(true);
@@ -91,7 +94,7 @@ export default function PoliciesPage() {
         policyId: policyId || undefined,
       });
 
-      setUploadSuccess(`Policy document "${selectedFile.name}" successfully indexed into ChromaDB (${res.chunks_indexed || res.chunks_created || 'chunks indexed'}).`);
+      setUploadSuccess(`Policy document "${selectedFile.name}" successfully indexed into ChromaDB (${res.chunks_indexed || res.chunks_created || res.chunks_count || 'chunks indexed'}).`);
       setSelectedFile(null);
       setPolicyId('');
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -101,6 +104,18 @@ export default function PoliciesPage() {
     } finally {
       setUploading(false);
     }
+  };
+
+  const toggleExpanded = (docId) => {
+    setExpandedDocIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) {
+        next.delete(docId);
+      } else {
+        next.add(docId);
+      }
+      return next;
+    });
   };
 
   const handleDelete = async (docId) => {
@@ -120,28 +135,60 @@ export default function PoliciesPage() {
     }
   };
 
+  const handleUpdateFile = async (doc, file) => {
+    const docId = doc.doc_id || doc.id;
+    if (!docId || !file) return;
+
+    setUpdatingId(docId);
+    setError(null);
+    setUploadSuccess(null);
+    try {
+      const res = await uploadPolicyFile({
+        file,
+        docId,
+        category: doc.category || undefined,
+        policyId: doc.policy_id || undefined,
+      });
+      setUploadSuccess(`Policy file "${doc.filename || docId}" replaced with "${file.name}" (${res.chunks_indexed || res.chunks_created || res.chunks_count || 'chunks indexed'}).`);
+      await loadDocuments();
+    } catch (err) {
+      setError(err.message || 'Failed to update policy document');
+    } finally {
+      setUpdatingId(null);
+      const input = updateInputRefs.current[docId];
+      if (input) input.value = '';
+    }
+  };
+
   const handleQuery = async (e) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
 
     setQuerying(true);
     setError(null);
+    const question = searchQuery.trim();
+    const nextMessages = [...chatMessages, { role: 'user', content: question }];
+    setChatMessages(nextMessages);
+    setSearchQuery('');
+
     try {
-      const res = await queryPolicyContext({
-        query: searchQuery,
+      const res = await answerPolicyQuestion({
+        question,
+        history: chatMessages,
         category: queryCategory || undefined,
-        topK: 3,
+        topK: 2,
       });
-      setQueryResults(res.results || res.documents || res);
-      const results = Array.isArray(res)
-        ? res
-        : Array.isArray(res?.results)
-        ? res.results
-        : Array.isArray(res?.documents)
-        ? res.documents
-        : [];
-      setQueryResults(results);
+      setChatMessages([
+        ...nextMessages,
+        {
+          role: 'assistant',
+          content: res.answer || 'No answer was generated.',
+          citations: res.citations || [],
+        },
+      ]);
     } catch (err) {
+      setChatMessages(chatMessages);
+      setSearchQuery(question);
       setError(err.message || 'Query failed');
     } finally {
       setQuerying(false);
@@ -274,11 +321,11 @@ export default function PoliciesPage() {
           </form>
         </div>
 
-        {/* Semantic Query Tester Card */}
+        {/* Policy Chat Card */}
         <div className="card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <Sparkles size={20} color="var(--accent-amber)" />
-            <h3 style={{ fontSize: '1.05rem', fontWeight: 600 }}>RAG Semantic Retrieval Tester</h3>
+            <h3 style={{ fontSize: '1.05rem', fontWeight: 600 }}>Policy & SOP Chatbot</h3>
           </div>
 
           <form onSubmit={handleQuery} style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -306,6 +353,7 @@ export default function PoliciesPage() {
                   type="submit"
                   className="button button-primary"
                   disabled={querying || !searchQuery.trim()}
+                  aria-label="Ask policy question"
                   style={{ padding: '0.5rem 1rem' }}
                 >
                   <Search size={16} className={querying ? 'spin' : ''} />
@@ -314,51 +362,63 @@ export default function PoliciesPage() {
             </div>
           </form>
 
-          {/* Query Results */}
-          {queryResults && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', maxHeight: '220px', overflowY: 'auto' }}>
-              <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                Retrieved Chunks:
-              </span>
-              {Array.isArray(queryResults) && queryResults.length > 0 ? (
-                queryResults.map((chunk, idx) => (
-                  <div
-                    key={idx}
-                    style={{
-                      padding: '0.6rem',
-                      background: 'var(--bg-primary)',
-                      borderRadius: 'var(--radius-sm)',
-                      fontSize: '0.8rem',
-                      border: '1px solid var(--border-color)',
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.2rem', display: 'flex', justifyContent: 'space-between' }}>
-                      <span>{chunk.policy_name || chunk.metadata?.policy_id || `Chunk #${idx + 1}`}</span>
-                      {chunk.score !== undefined && (
-                        <span style={{ color: 'var(--accent-emerald)', fontSize: '0.75rem' }}>
-                          Score: {(1 - Number(chunk.score)).toFixed(2)}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem', maxHeight: '260px', overflowY: 'auto' }}>
+            {chatMessages.length === 0 ? (
+              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Ask a question about the indexed policies.</p>
+            ) : (
+              chatMessages.map((message, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
+                    maxWidth: '90%',
+                    padding: '0.7rem',
+                    background: message.role === 'user' ? 'rgba(59, 130, 246, 0.12)' : 'var(--bg-primary)',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--border-color)',
+                  }}
+                >
+                  <p style={{ color: 'var(--text-primary)', fontSize: '0.82rem', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                    {message.content}
+                  </p>
+                  {Array.isArray(message.citations) && message.citations.length > 0 && (
+                    <div style={{ marginTop: '0.55rem', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Citations</span>
+                      {message.citations.map((citation, cIdx) => (
+                        <span key={cIdx} style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                          {citation.citation || citation.policy_id || citation.policy_name || `Citation ${cIdx + 1}`}
                         </span>
-                      )}
+                      ))}
                     </div>
-                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.775rem', lineHeight: 1.4 }}>
-                      {chunk.text || chunk.content || (typeof chunk === 'string' ? chunk : JSON.stringify(chunk))}
-                    </p>
-                  </div>
-                ))
-              ) : (
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>No matching chunks found.</p>
-              )}
-            </div>
-          )}
+                  )}
+                </div>
+              ))
+            )}
+            {querying && (
+              <div
+                style={{
+                  alignSelf: 'flex-start',
+                  padding: '0.7rem',
+                  background: 'var(--bg-primary)',
+                  borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--border-color)',
+                  color: 'var(--text-muted)',
+                  fontSize: '0.82rem',
+                }}
+              >
+                Answering...
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Indexed Documents Table */}
+      {/* Current Policy Files */}
       <div className="card" style={{ padding: '1.5rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
           <h3 style={{ fontSize: '1.05rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <BookOpen size={18} color="var(--primary)" />
-            Indexed Policy & SOP Documents ({documents.length})
+            Current Policy Files ({documents.length})
           </h3>
         </div>
 
@@ -370,19 +430,19 @@ export default function PoliciesPage() {
         ) : documents.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '2.5rem 1rem', color: 'var(--text-muted)' }}>
             <FileText size={36} style={{ margin: '0 auto 0.75rem auto', opacity: 0.6 }} />
-            <p>No policy documents indexed in ChromaDB yet. Upload SOP markdown/text files above.</p>
+            <p>No policy files found. Upload SOP markdown/text files above.</p>
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.875rem' }}>
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--border-color)', color: 'var(--text-muted)' }}>
-                  <th style={{ padding: '0.75rem 0.5rem' }}>Policy ID / Title</th>
                   <th style={{ padding: '0.75rem 0.5rem' }}>Filename</th>
+                  <th style={{ padding: '0.75rem 0.5rem' }}>Policy ID / Title</th>
                   <th style={{ padding: '0.75rem 0.5rem' }}>Category</th>
                   <th style={{ padding: '0.75rem 0.5rem' }}>Chunks</th>
                   <th style={{ padding: '0.75rem 0.5rem' }}>Indexed At</th>
-                  <th style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Action</th>
+                  <th style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -390,37 +450,82 @@ export default function PoliciesPage() {
                   if (!doc || typeof doc !== 'object') return null;
                   const docId = doc.doc_id || doc.id || `doc-${idx}`;
                   const isDeleting = deletingId === docId;
+                  const isUpdating = updatingId === docId;
+                  const isExpanded = expandedDocIds.has(docId);
                   return (
-                    <tr key={docId} style={{ borderBottom: '1px solid var(--border-color)' }}>
-                      <td style={{ padding: '0.75rem 0.5rem', fontWeight: 600 }}>
-                        {doc.policy_name || doc.title || doc.policy_id || docId}
-                      </td>
-                      <td style={{ padding: '0.75rem 0.5rem', color: 'var(--text-secondary)', fontFamily: 'monospace', fontSize: '0.8rem' }}>
-                        {doc.filename || `${docId}.md`}
-                      </td>
-                      <td style={{ padding: '0.75rem 0.5rem' }}>
-                        <span className="badge badge-neutral" style={{ textTransform: 'uppercase', fontSize: '0.75rem' }}>
-                          {doc.category || 'RECONCILIATION'}
-                        </span>
-                      </td>
-                      <td style={{ padding: '0.75rem 0.5rem' }}>
-                        {doc.chunk_count || doc.chunks_count || doc.chunks || 1}
-                      </td>
-                      <td style={{ padding: '0.75rem 0.5rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-                        {doc.created_at || doc.last_ingested ? new Date(doc.created_at || doc.last_ingested).toLocaleDateString() : 'Active'}
-                      </td>
-                      <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>
-                        <button
-                          className="button button-ghost"
-                          style={{ color: 'var(--accent-rose)', padding: '0.25rem 0.5rem' }}
-                          onClick={() => handleDelete(docId)}
-                          disabled={isDeleting}
-                          title="Delete policy from ChromaDB"
-                        >
-                          <Trash2 size={16} className={isDeleting ? 'spin' : ''} />
-                        </button>
-                      </td>
-                    </tr>
+                    <React.Fragment key={docId}>
+                      <tr style={{ borderBottom: isExpanded ? 'none' : '1px solid var(--border-color)' }}>
+                        <td style={{ padding: '0.75rem 0.5rem', color: 'var(--text-secondary)', fontFamily: 'monospace', fontSize: '0.8rem' }}>
+                          <button
+                            type="button"
+                            className="button button-ghost"
+                            onClick={() => toggleExpanded(docId)}
+                            title={isExpanded ? 'Collapse file details' : 'Expand file details'}
+                            style={{ padding: '0.2rem', marginRight: '0.4rem', verticalAlign: 'middle' }}
+                          >
+                            {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                          </button>
+                          {doc.filename || `${docId}.md`}
+                        </td>
+                        <td style={{ padding: '0.75rem 0.5rem', fontWeight: 600 }}>
+                          {doc.policy_name || doc.title || doc.policy_id || docId}
+                        </td>
+                        <td style={{ padding: '0.75rem 0.5rem' }}>
+                          <span className="badge badge-neutral" style={{ textTransform: 'uppercase', fontSize: '0.75rem' }}>
+                            {doc.category || 'RECONCILIATION'}
+                          </span>
+                        </td>
+                        <td style={{ padding: '0.75rem 0.5rem' }}>
+                          {doc.chunk_count || doc.chunks_count || doc.chunks || 1}
+                        </td>
+                        <td style={{ padding: '0.75rem 0.5rem', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                          {doc.created_at || doc.last_ingested ? new Date(doc.created_at || doc.last_ingested).toLocaleDateString() : 'Active'}
+                        </td>
+                        <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>
+                          <input
+                            type="file"
+                            accept=".md,.txt,.pdf,.docx,.markdown"
+                            ref={(el) => {
+                              updateInputRefs.current[docId] = el;
+                            }}
+                            onChange={(e) => handleUpdateFile(doc, e.target.files?.[0])}
+                            style={{ display: 'none' }}
+                          />
+                          <button
+                            type="button"
+                            className="button button-outline"
+                            style={{ padding: '0.25rem 0.5rem', marginRight: '0.4rem' }}
+                            onClick={() => updateInputRefs.current[docId]?.click()}
+                            disabled={isUpdating || isDeleting}
+                            title="Upload an updated file and replace this policy"
+                          >
+                            <UploadCloud size={16} className={isUpdating ? 'spin' : ''} />
+                            <span style={{ marginLeft: '0.35rem' }}>{isUpdating ? 'Updating...' : 'Update'}</span>
+                          </button>
+                          <button
+                            className="button button-ghost"
+                            style={{ color: 'var(--accent-rose)', padding: '0.25rem 0.5rem' }}
+                            onClick={() => handleDelete(docId)}
+                            disabled={isDeleting || isUpdating}
+                            title="Delete policy from ChromaDB"
+                          >
+                            <Trash2 size={16} className={isDeleting ? 'spin' : ''} />
+                          </button>
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr style={{ borderBottom: '1px solid var(--border-color)' }}>
+                          <td colSpan={6} style={{ padding: '0 0.5rem 0.9rem 2.5rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.6rem', padding: '0.75rem', background: 'var(--bg-primary)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
+                              <span><strong style={{ color: 'var(--text-primary)' }}>Document ID:</strong> {docId}</span>
+                              <span><strong style={{ color: 'var(--text-primary)' }}>Policy ID:</strong> {doc.policy_id || 'N/A'}</span>
+                              <span><strong style={{ color: 'var(--text-primary)' }}>Title:</strong> {doc.policy_name || doc.title || 'N/A'}</span>
+                              <span><strong style={{ color: 'var(--text-primary)' }}>Filename:</strong> {doc.filename || `${docId}.md`}</span>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })}
               </tbody>

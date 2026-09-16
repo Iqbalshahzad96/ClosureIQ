@@ -56,6 +56,54 @@ export async function runWorkflow({
   return await response.json();
 }
 
+export async function fetchReconciliationPreview(period, { signal } = {}) {
+  const url = `${BASE_URL}/reconciliation/preview?period=${encodeURIComponent(period)}`;
+  
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+
+  if (!response.ok) {
+    let errorDetail = '';
+    try {
+      const errJson = await response.json();
+      errorDetail = errJson.detail || errJson.message || '';
+    } catch {
+      errorDetail = await response.text().catch(() => '');
+    }
+    throw new Error(errorDetail || `Preview failed with status ${response.status}`);
+  }
+
+  return await response.json();
+}
+
+export async function fetchUnresolvedMappings({ signal } = {}) {
+  const url = `${BASE_URL}/reconciliation/unresolved-mappings`;
+  const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' }, signal });
+  if (!response.ok) throw new Error('Failed to fetch unresolved mappings');
+  return await response.json();
+}
+
+export async function resolveMapping(bankAccountId, glAccountId) {
+  const url = `${BASE_URL}/reconciliation/resolve-mapping`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ bank_account_id: bankAccountId, gl_account_id: glAccountId })
+  });
+  if (!response.ok) throw new Error('Failed to resolve mapping');
+  return await response.json();
+}
+
+export async function fetchPeriods({ signal } = {}) {
+  const url = `${BASE_URL}/reconciliation/periods`;
+  const response = await fetch(url, { method: 'GET', headers: { Accept: 'application/json' }, signal });
+  if (!response.ok) throw new Error('Failed to fetch periods');
+  return await response.json();
+}
+
 export async function fetchWorkflowSummary(runId, { signal } = {}) {
   const query = runId ? `?run_id=${encodeURIComponent(runId)}` : '';
   const url = `${BASE_URL}/reconciliation/summary${query}`;

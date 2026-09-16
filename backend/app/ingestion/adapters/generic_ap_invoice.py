@@ -45,7 +45,17 @@ class GenericAPInvoiceAdapter(BaseAdapter):
         return detects(file_bytes, self._is_header)
 
     def parse_file(self, file_bytes, filename, options=None):
-        yield from parse_table(file_bytes, filename, self._is_header)
+        from app.ingestion.adapters.metadata import extract_title_metadata
+        try:
+            for row in parse_table(file_bytes, filename, self._is_header):
+                if row.role == RowRole.TITLE and options is not None:
+                    extract_title_metadata(row.raw_values.get("title", []), options)
+                yield row
+        except ValueError as exc:
+            if hasattr(exc, "candidates"):
+                msg = f"Missing required columns: Vendor and Invoice Number. Closest header found was: {exc.candidates[0] if exc.candidates else 'None'}"
+                raise ValueError(msg) from exc
+            raise
 
     def map_to_canonical(
         self, raw_rows: List[RawSourceRow], options: Optional[Dict[str, Any]] = None

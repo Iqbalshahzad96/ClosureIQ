@@ -24,8 +24,9 @@ class DuplicateImportError(Exception):
 class RawStorageManager:
     """Manages immutable batch-scoped storage of uploaded raw files."""
 
-    def __init__(self, base_storage_dir: str = "storage/raw"):
+    def __init__(self, base_storage_dir: str = "storage/raw", staging_dir: str = "storage/staged"):
         self.base_storage_dir = base_storage_dir
+        self.staging_dir = staging_dir
 
     @staticmethod
     def validate_component(value: str) -> None:
@@ -98,33 +99,85 @@ class RawStorageManager:
             relative_path = str(target_path.resolve()).replace("\\", "/")
         return relative_path, sha256, byte_size
 
+    def stage_file(self, file_bytes: bytes, filename: str) -> Tuple[str, str, int]:
+        """Stage file bytes using SHA-256 for deduplication."""
+        self.validate_component(filename)
+        sha256 = self.calculate_sha256(file_bytes)
+        byte_size = len(file_bytes)
+
+        staging_root = Path(self.staging_dir).resolve()
+        os.makedirs(staging_root, exist_ok=True)
+        
+        target_path = (staging_root / f"{sha256}_{filename}").resolve()
+        if not target_path.is_relative_to(staging_root):
+            raise ValueError("Storage path escapes staging")
+            
+        if not target_path.exists():
+            with open(target_path, "xb") as f:
+                f.write(file_bytes)
+
+        try:
+            relative_path = os.path.relpath(target_path).replace("\\", "/")
+        except ValueError:
+            relative_path = str(target_path).replace("\\", "/")
+            
+        return relative_path, sha256, byte_size
+
+    def delete_file(self, relative_path: str) -> None:
+        """Safely delete a stored or staged file."""
+        try:
+            full_path = self.resolve_path(relative_path)
+            if full_path.exists():
+                os.remove(full_path)
+        except Exception as e:
+            pass # Ignore deletion errors to avoid breaking flows
+
+    def cleanup_staged_files(self, max_age_hours: int = 24) -> int:
+        """Delete staged files older than max_age_hours."""
+        import time
+        staging_root = Path(self.staging_dir).resolve()
+        if not staging_root.exists():
+            return 0
+            
+        deleted_count = 0
+        current_time = time.time()
+        max_age_seconds = max_age_hours * 3600
+        
+        for file_path in staging_root.iterdir():
+            if file_path.is_file():
+                try:
+                    mtime = file_path.stat().st_mtime
+                    if current_time - mtime > max_age_seconds:
+                        file_path.unlink()
+                        deleted_count += 1
+                except Exception:
+                    pass
+        return deleted_count
+
     def resolve_path(self, relative_path: str) -> Path:
         """Resolve a stored raw file path, ensuring containment within storage root."""
         root = Path(self.base_storage_dir).resolve()
+        staging_root = Path(self.staging_dir).resolve()
+        
+        # Try as-is from cwd
         try:
-            full_path = Path(os.path.abspath(relative_path)).resolve()
+            cwd_candidate = Path(os.path.abspath(relative_path)).resolve()
+            if cwd_candidate.exists() and (cwd_candidate.is_relative_to(root) or cwd_candidate.is_relative_to(staging_root)):
+                return cwd_candidate
         except Exception:
-            full_path = (root / relative_path).resolve()
-        candidate = Path(relative_path)
-        if candidate.is_absolute():
-            full_path = candidate.resolve()
-        else:
-            # First check if relative to cwd and within root and exists
-            try:
-                cwd_candidate = Path(os.path.abspath(relative_path)).resolve()
-                if cwd_candidate.is_relative_to(root) and cwd_candidate.exists():
-                    full_path = cwd_candidate
-                else:
-                    full_path = (root / relative_path).resolve()
-            except Exception:
-                full_path = (root / relative_path).resolve()
+            pass
 
-        if not full_path.is_relative_to(root):
-            full_path = (root / relative_path).resolve()
-        if not full_path.is_relative_to(root):
-            raise ValueError("Storage path escapes root")
+        # Try relative to staging root (for staged files)
+        full_path_staged = (staging_root / relative_path).resolve()
+        if full_path_staged.is_relative_to(staging_root) and full_path_staged.exists():
+            return full_path_staged
 
-        return full_path
+        # Try relative to raw root
+        full_path_raw = (root / relative_path).resolve()
+        if full_path_raw.is_relative_to(root):
+            return full_path_raw
+
+        raise ValueError("Storage path escapes root and staging")
 
     def read_file(self, relative_path: str) -> bytes:
         """Read bytes of an existing stored raw file."""

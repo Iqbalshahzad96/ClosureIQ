@@ -210,21 +210,40 @@ class FinancialMCPTools:
         finally:
             session.close()
 
-    async def query_bank_transactions(self, account_code: str, limit: int = 50) -> List[Dict[str, Any]]:
+    async def query_bank_transactions(self, account_code: str, limit: int = 50, fiscal_period: Optional[str] = None) -> List[Dict[str, Any]]:
         """Independent canonical bank statements linked to the requested GL account."""
         from app.database.models import Account, BankAccount, BankTransaction
         self._validate_limit(limit)
         session = self._get_session()
         try:
-            rows = (session.query(BankTransaction, Account)
+            query = (session.query(BankTransaction, Account)
                 .join(BankAccount, BankTransaction.bank_account_id == BankAccount.id)
                 .join(Account, BankAccount.linked_gl_account_id == Account.id)
                 .filter(Account.account_code == account_code,
                         Account.organization_id == self.organization_id,
                         BankAccount.organization_id == self.organization_id,
                         BankTransaction.currency_code == BankAccount.currency_code,
-                        BankAccount.currency_code == Account.currency_code)
-                .order_by(BankTransaction.booking_date.desc(), BankTransaction.id)
+                        BankAccount.currency_code == Account.currency_code))
+            
+            if fiscal_period:
+                if len(fiscal_period) == 4 and fiscal_period.isdigit():
+                    from datetime import datetime
+                    year = int(fiscal_period)
+                    start_date = datetime(year, 1, 1)
+                    end_date = datetime(year, 12, 31, 23, 59, 59)
+                    query = query.filter(BankTransaction.booking_date >= start_date, BankTransaction.booking_date <= end_date)
+                elif "-" in fiscal_period:
+                    try:
+                        year, month = map(int, fiscal_period.split("-")[:2])
+                        from datetime import datetime
+                        import calendar
+                        start_date = datetime(year, month, 1)
+                        end_date = datetime(year, month, calendar.monthrange(year, month)[1], 23, 59, 59)
+                        query = query.filter(BankTransaction.booking_date >= start_date, BankTransaction.booking_date <= end_date)
+                    except Exception:
+                        pass
+                        
+            rows = (query.order_by(BankTransaction.booking_date.desc(), BankTransaction.id)
                 .limit(limit).all())
             return [{'id':row.id,'source':'BANK','account_code':account.account_code,
                      'transaction_date':self._serialize_datetime(row.booking_date),
