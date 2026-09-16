@@ -66,6 +66,33 @@ def test_bank_and_gl_follow_period(workflow_service, db_session_factory):
         assert account["bank_transactions"][0]["transaction_date"].startswith("2026-01")
 
 
+def test_year_preview_counts_gl_with_quarter_fiscal_period(workflow_service, db_session_factory):
+    with db_session_factory() as db:
+        financial_record(db, id="gl_quarter", source="GL", account_code="1010",
+            amount=100, transaction_date=datetime(2025, 3, 15))
+        db.get(JournalEntry, "entry_gl_quarter").fiscal_period = "2025-Q1"
+        financial_record(db, id="gl_date_fallback", source="GL", account_code="1010",
+            amount=200, transaction_date=datetime(2025, 9, 15))
+        db.get(JournalEntry, "entry_gl_date_fallback").fiscal_period = "FY25"
+        financial_record(db, id="bank_2025", source="BANK", account_code="1010",
+            amount=100, transaction_date=datetime(2025, 3, 16))
+        financial_record(db, id="gl_other_year", source="GL", account_code="1010",
+            amount=300, transaction_date=datetime(2024, 12, 31))
+        account = db.query(Account).filter_by(account_code="1010").one()
+        account.currency_code = "USD"
+        account.account_code = None
+        db.commit()
+
+    preview = asyncio.run(workflow_service.get_reconciliation_preview("2025"))
+    result = asyncio.run(workflow_service.deps.fetch_data("reconciliation", {"period": "2025", "limit": 1}))
+
+    assert preview["total_gl_transactions"] == 2
+    assert preview["total_bank_transactions"] == 1
+    assert len(result["accounts_data"]) == 1
+    assert len(result["accounts_data"][0]["gl_transactions"]) == 2
+    assert len(result["accounts_data"][0]["bank_transactions"]) == 1
+
+
 @pytest.mark.parametrize("workflow", ["accrual", "depreciation", "ap_review"])
 def test_empty_period_has_clear_error(workflow_service, workflow):
     with pytest.raises(ValueError, match="No eligible"):

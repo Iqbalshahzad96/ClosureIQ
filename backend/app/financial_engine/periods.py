@@ -21,14 +21,21 @@ def period_bounds(period: str):
 
 
 def ledger_period_filter(period_column, date_column, period):
-    """Prefer the booked fiscal period, using dates only when it is missing."""
+    """Match fiscal period labels and dated rows inside the selected period."""
     from sqlalchemy import and_, or_
     start, end = period_bounds(period)
+    value = period.strip()
     months = []
+    quarters = set()
     current = start
     while current < end:
         months.append(current.strftime("%Y-%m"))
+        quarters.add(f"{current.year:04d}-Q{((current.month - 1) // 3) + 1}")
         current = datetime(current.year + current.month // 12, current.month % 12 + 1, 1)
-    return or_(period_column.in_([period.strip(), *months]),
-        and_(or_(period_column.is_(None), period_column == ""),
-             date_column >= start, date_column < end))
+    labels = [value, *months, *sorted(quarters)]
+    if len(months) == 12:
+        labels.append(start.strftime("%Y"))
+    return or_(
+        period_column.in_(labels),
+        and_(date_column >= start, date_column < end),
+    )

@@ -2,7 +2,7 @@
 Human-in-the-Loop (HITL) Approvals API Routes
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -20,8 +20,10 @@ class ApprovalActionRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     decision: str = Field(..., description="Approval decision: 'approved' | 'rejected' (case-insensitive)")
-    reviewer: str = Field(default="Accountant", description="Name or role of the human reviewer")
+    reviewer: str = Field(default="Controller", description="Name or role of the human reviewer")
     comments: str = Field(default="", description="Optional audit notes or reason")
+    approved_entry_ids: Optional[List[str]] = Field(default=None, description="Optional list of specific exception IDs approved for GL posting")
+    held_entry_ids: Optional[List[str]] = Field(default=None, description="Optional list of specific exception IDs held or rejected")
 
     @field_validator("decision")
     @classmethod
@@ -48,7 +50,7 @@ async def submit_approval_decision(
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> Dict[str, Any]:
     """
-    Submit human review decision (Approve or Reject) to resume the paused LangGraph workflow checkpoint.
+    Submit human review decision (Approve, Selective Approve, or Reject) to resume the paused LangGraph workflow checkpoint.
     """
     if not run_id or not run_id.strip():
         raise HTTPException(
@@ -62,6 +64,8 @@ async def submit_approval_decision(
             decision=action.decision,
             reviewer=action.reviewer,
             comments=action.comments,
+            approved_entry_ids=action.approved_entry_ids,
+            held_entry_ids=action.held_entry_ids,
         )
         return result
     except RunConflictError as exc:

@@ -18,7 +18,7 @@ export default function App() {
       case 'financial-upload':
         return <FinancialUploadPage setActiveTab={setActiveTab} />;
       case 'reconciliation':
-        return <ReconciliationPage />;
+        return <ReconciliationPage setActiveTab={setActiveTab} />;
       case 'exceptions':
         return <ExceptionsPage />;
       case 'approvals':

@@ -352,10 +352,6 @@ async def run_reconciliation(
             run_id=payload.run_id,
         )
         return result
-    except RunConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -385,20 +381,24 @@ def _enrich_reconciliation_summary(run_state: Dict[str, Any]) -> Dict[str, Any]:
         val_res = run_state.get("validation_results") or {}
         metrics = val_res.get("metrics") or {}
         
-        matched_count = metrics.get("matched_count", 0)
-        unmatched_gl = metrics.get("unmatched_gl_count", 0)
-        unmatched_bank = metrics.get("unmatched_bank_count", 0)
+        matched_count = int(metrics.get("matched_count", 0))
+        unmatched_gl = int(metrics.get("unmatched_gl_count", 0))
+        unmatched_bank = int(metrics.get("unmatched_bank_count", 0))
         
         total_transactions = matched_count * 2 + unmatched_gl + unmatched_bank
         matched_percentage = (matched_count * 2 / total_transactions * 100) if total_transactions > 0 else 0
         
         exceptions = run_state.get("exceptions", [])
-        hitl_pending = sum(1 for e in exceptions if e.get("status") == "OPEN")
-        approved = sum(1 for e in exceptions if e.get("status") == "APPROVED")
+        hitl_pending = sum(1 for e in exceptions if e.get("status") in ("OPEN", "IN_REVIEW"))
+        approved = sum(1 for e in exceptions if e.get("status") in ("APPROVED", "RESOLVED"))
         rejected = sum(1 for e in exceptions if e.get("status") == "REJECTED")
         
-        final_matched_count = matched_count + approved
-        final_percentage = (final_matched_count * 2 / total_transactions * 100) if total_transactions > 0 else 0
+        status_val = run_state.get("status", "")
+        if status_val in ("clean_close", "completed", "approved") and len(exceptions) == 0:
+            final_percentage = 100.0
+        else:
+            final_matched_count = matched_count + approved
+            final_percentage = (final_matched_count * 2 / total_transactions * 100) if total_transactions > 0 else 100.0
         
         run_state["summary_metrics"] = {
             "matched_count": matched_count,
@@ -409,7 +409,7 @@ def _enrich_reconciliation_summary(run_state: Dict[str, Any]) -> Dict[str, Any]:
             "hitl_pending_count": hitl_pending,
             "approved_count": approved,
             "rejected_count": rejected,
-            "final_reconciled_percentage": round(final_percentage, 2)
+            "final_reconciled_percentage": round(min(100.0, final_percentage), 2),
         }
     return run_state
 
@@ -437,21 +437,40 @@ async def get_reconciliation_summary(
     """
     Retrieve financial close workflow summary and latest metrics.
     """
-    if run_id:
-        run_state = await workflow_service.get_run_state(run_id)
+    effective_run_id = run_id if isinstance(run_id, str) and run_id.strip() else None
+    if effective_run_id:
+        run_state = await workflow_service.get_run_state(effective_run_id)
         if not run_state:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Run '{run_id}' not found",
+                detail=f"Run '{effective_run_id}' not found",
             )
         return _enrich_reconciliation_summary(run_state)
 
-    # Return latest run or default summary
+    # 1. Return latest run from live memory if active
     if workflow_service._runs:
         latest_run_id = list(workflow_service._runs.keys())[-1]
         latest_state = await workflow_service.get_run_state(latest_run_id)
         if latest_state:
             return _enrich_reconciliation_summary(latest_state)
+
+    # 2. Database audit fallback: find latest run from audit_events (newest first)
+    try:
+        audit_records = workflow_service._query_audit_records()
+        run_ids = []
+        for r in audit_records:
+            if r.run_id and r.run_id not in run_ids:
+                run_ids.append(r.run_id)
+        for rid in reversed(run_ids):
+            db_state = workflow_service._load_persisted_snapshot(rid)
+            if db_state and db_state.get("status") in ("clean_close", "completed", "approved", "hitl_pending"):
+                return _enrich_reconciliation_summary(db_state)
+        if run_ids:
+            latest_state = workflow_service._load_persisted_snapshot(run_ids[-1])
+            if latest_state:
+                return _enrich_reconciliation_summary(latest_state)
+    except Exception:
+        pass
 
     return {
         "status": "idle",

@@ -180,7 +180,15 @@ class FinancialMCPTools:
         finally:
             session.close()
 
-    async def query_gl_transactions(self, account_code: str, limit: int = 50, fiscal_period: Optional[str] = None, offset: int = 0) -> List[Dict[str, Any]]:
+    async def query_gl_transactions(
+        self,
+        account_code: Optional[str] = None,
+        limit: int = 50,
+        fiscal_period: Optional[str] = None,
+        offset: int = 0,
+        account_id: Optional[str] = None,
+        currency_code: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """Canonical postings only; signed amount is debit minus credit.
 
         Original debit/credit columns and draft status remain visible. No source
@@ -193,10 +201,14 @@ class FinancialMCPTools:
             query = (session.query(JournalLine, JournalEntry, Account)
                 .join(JournalEntry, JournalLine.journal_entry_id == JournalEntry.id)
                 .join(Account, JournalLine.account_id == Account.id)
-                .filter(Account.account_code == account_code,
-                        Account.organization_id == self.organization_id,
-                        JournalEntry.organization_id == self.organization_id,
-                        JournalEntry.currency_code == Account.currency_code))
+                .filter(Account.organization_id == self.organization_id,
+                        JournalEntry.organization_id == self.organization_id))
+            if account_id:
+                query = query.filter(Account.id == account_id)
+            else:
+                query = query.filter(Account.account_code == account_code)
+            if currency_code:
+                query = query.filter(JournalEntry.currency_code == currency_code)
             if fiscal_period:
                 query = query.filter(ledger_period_filter(JournalEntry.fiscal_period, JournalEntry.entry_date, fiscal_period))
             rows = (query.order_by(JournalEntry.entry_date.desc(), JournalLine.id)
@@ -213,7 +225,15 @@ class FinancialMCPTools:
         finally:
             session.close()
 
-    async def query_bank_transactions(self, account_code: str, limit: int = 50, fiscal_period: Optional[str] = None, offset: int = 0) -> List[Dict[str, Any]]:
+    async def query_bank_transactions(
+        self,
+        account_code: Optional[str] = None,
+        limit: int = 50,
+        fiscal_period: Optional[str] = None,
+        offset: int = 0,
+        bank_account_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """Independent canonical bank statements linked to the requested GL account."""
         from app.database.models import Account, BankAccount, BankTransaction
         self._validate_limit(limit)
@@ -222,11 +242,15 @@ class FinancialMCPTools:
             query = (session.query(BankTransaction, Account)
                 .join(BankAccount, BankTransaction.bank_account_id == BankAccount.id)
                 .join(Account, BankAccount.linked_gl_account_id == Account.id)
-                .filter(Account.account_code == account_code,
-                        Account.organization_id == self.organization_id,
+                .filter(Account.organization_id == self.organization_id,
                         BankAccount.organization_id == self.organization_id,
-                        BankTransaction.currency_code == BankAccount.currency_code,
-                        BankAccount.currency_code == Account.currency_code))
+                        BankTransaction.currency_code == BankAccount.currency_code))
+            if bank_account_id:
+                query = query.filter(BankAccount.id == bank_account_id)
+            elif account_id:
+                query = query.filter(Account.id == account_id)
+            else:
+                query = query.filter(Account.account_code == account_code)
             
             if fiscal_period:
                 start, end = period_bounds(fiscal_period)

@@ -7,6 +7,7 @@ into standardized, structured, auditable FinancialException models matching the 
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -33,7 +34,7 @@ class FinancialException(BaseModel):
             "period": self.period,
             "category": self.category,
             "severity": self.severity,
-            "amount_variance": round(self.amount_variance, 2),
+            "amount_variance": self.amount_variance,
             "description": self.description,
             "status": self.status,
             "created_at": self.created_at.isoformat(),
@@ -42,39 +43,26 @@ class FinancialException(BaseModel):
 
 
 class ExceptionGenerator:
-    """Generates standardized financial exceptions with deterministic severity grading."""
+    """Standardizes anomalies across reconciliation, accrual, and depreciation engines."""
 
-    def __init__(
-        self,
-        high_severity_threshold: float = 1000.0,
-        medium_severity_threshold: float = 50.0,
-    ) -> None:
-        self.high_threshold = max(0.0, float(high_severity_threshold))
-        self.medium_threshold = max(0.0, float(medium_severity_threshold))
+    HIGH_THRESHOLD: float = 10000.0
+    MEDIUM_THRESHOLD: float = 1000.0
 
-    def determine_severity(
-        self,
-        amount_variance: float,
-        override_severity: Optional[str] = None,
-    ) -> str:
-        """Deterministically determine exception severity based on dollar variance amount."""
-        if override_severity in {"HIGH", "MEDIUM", "LOW"}:
-            return override_severity
-
-        abs_amount = abs(amount_variance)
-        if abs_amount >= self.high_threshold:
+    def determine_severity(self, amount: float) -> str:
+        """Assign severity based on financial materiality thresholds."""
+        abs_amt = abs(amount)
+        if abs_amt >= self.HIGH_THRESHOLD:
             return "HIGH"
-        elif abs_amount >= self.medium_threshold:
+        if abs_amt >= self.MEDIUM_THRESHOLD:
             return "MEDIUM"
-        else:
-            return "LOW"
+        return "LOW"
 
     def from_reconciliation(
         self,
         reconciliation_output: Dict[str, Any],
         period: str = "CURRENT",
     ) -> List[FinancialException]:
-        """Convert unmatched GL and bank items from reconciliation into exceptions."""
+        """Convert unmatched GL and bank items from reconciliation into exceptions with deterministic stable IDs."""
         exceptions: List[FinancialException] = []
 
         # Unmatched GL lines
@@ -82,13 +70,15 @@ class ExceptionGenerator:
             amount = float(gl_item.get("amount", 0.0))
             ref = gl_item.get("reference") or gl_item.get("id") or "N/A"
             account_code = gl_item.get("account_code") or "N/A"
+            gl_key = gl_item.get("id") or ref
+            stable_id = f"exc_rec_gl_{hashlib.sha256(f'{period}:GL:{gl_key}:{amount:.2f}'.encode()).hexdigest()[:12]}"
             desc = (
                 f"Unmatched GL transaction: Ref={ref}, Account={account_code}, "
                 f"Amount=${amount:,.2f}. No corresponding bank entry found."
             )
             exceptions.append(
                 FinancialException(
-                    id=f"exc_rec_gl_{uuid.uuid4().hex[:8]}",
+                    id=stable_id,
                     period=period,
                     category="RECONCILIATION",
                     severity=self.determine_severity(amount),
@@ -103,13 +93,15 @@ class ExceptionGenerator:
             amount = float(b_item.get("amount", 0.0))
             ref = b_item.get("reference") or b_item.get("id") or "N/A"
             account_code = b_item.get("account_code") or "N/A"
+            bank_key = b_item.get("id") or ref
+            stable_id = f"exc_rec_bank_{hashlib.sha256(f'{period}:BANK:{bank_key}:{amount:.2f}'.encode()).hexdigest()[:12]}"
             desc = (
                 f"Unmatched Bank statement transaction: Ref={ref}, Account={account_code}, "
                 f"Amount=${amount:,.2f}. No corresponding GL entry posted."
             )
             exceptions.append(
                 FinancialException(
-                    id=f"exc_rec_bank_{uuid.uuid4().hex[:8]}",
+                    id=stable_id,
                     period=period,
                     category="RECONCILIATION",
                     severity=self.determine_severity(amount),

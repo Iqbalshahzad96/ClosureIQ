@@ -139,8 +139,10 @@ export async function fetchPendingApprovals({ signal } = {}) {
 export async function submitApprovalDecision({
   runId,
   decision,
-  reviewer = 'Accountant',
+  reviewer = 'Controller',
   comments = '',
+  approvedEntryIds = null,
+  heldEntryIds = null,
   signal,
 }) {
   if (!runId) {
@@ -148,17 +150,26 @@ export async function submitApprovalDecision({
   }
 
   const url = `${BASE_URL}/approvals/${encodeURIComponent(runId)}/decision`;
+  const payload = {
+    decision,
+    reviewer: reviewer || 'Controller',
+    comments: comments || '',
+  };
+
+  if (Array.isArray(approvedEntryIds)) {
+    payload.approved_entry_ids = approvedEntryIds;
+  }
+  if (Array.isArray(heldEntryIds)) {
+    payload.held_entry_ids = heldEntryIds;
+  }
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
     },
-    body: JSON.stringify({
-      decision,
-      reviewer: reviewer || 'Accountant',
-      comments: comments || '',
-    }),
+    body: JSON.stringify(payload),
     signal,
   });
 
@@ -176,12 +187,13 @@ export async function submitApprovalDecision({
   return await response.json();
 }
 
-export async function fetchExceptions({ period, status, category, limit = 100, signal } = {}) {
+export async function fetchExceptions({ period, status, category, limit = 50, offset = 0, signal } = {}) {
   const params = new URLSearchParams();
   if (period) params.set('period', period);
   if (status) params.set('status', status);
   if (category) params.set('category', category);
   if (limit) params.set('limit', String(limit));
+  if (offset) params.set('offset', String(offset));
 
   const qs = params.toString();
   const url = `${BASE_URL}/exceptions/${qs ? `?${qs}` : ''}`;
@@ -193,6 +205,32 @@ export async function fetchExceptions({ period, status, category, limit = 100, s
 
   if (!response.ok) {
     throw new Error(`Failed to fetch exceptions (${response.status})`);
+  }
+
+  const data = await response.json();
+  const totalHeader = response.headers.get('X-Total-Count');
+  return {
+    items: Array.isArray(data) ? data : [],
+    totalCount: totalHeader ? parseInt(totalHeader, 10) : undefined,
+  };
+}
+
+export async function fetchExceptionsSummary({ period, status, category, signal } = {}) {
+  const params = new URLSearchParams();
+  if (period) params.set('period', period);
+  if (status) params.set('status', status);
+  if (category) params.set('category', category);
+
+  const qs = params.toString();
+  const url = `${BASE_URL}/exceptions/summary${qs ? `?${qs}` : ''}`;
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch exceptions summary (${response.status})`);
   }
 
   return await response.json();

@@ -3,20 +3,6 @@ WorkflowService: Production Orchestrator Integration Service
 
 Wires the existing MCP tools, deterministic Financial Engine, ExceptionGenerator,
 Agent 1, Policy RAG Retriever, Agent 2, and LangGraph HITL into production FastAPI workflows.
-
-NOTE:
-Pending workflows are held in the application-lifetime MemorySaver and do not
-survive server restarts.
-- ClosureIQ uses an in-memory MemorySaver checkpointer for the MVP.
-- The service is explicitly designed and documented for single-process, single-worker execution (e.g. uvicorn --workers 1).
-- Pending workflows are maintained in application memory and do not survive server restarts.
-- Do not add a persistent checkpointer dependency in this branch.
-
-Cancellation Semantics & MVP Boundaries:
-- Asynchronous task cancellations preserve and re-raise asyncio.CancelledError.
-- Cleanups are bounded with a 5.0-second timeout to prevent indefinite hangs.
-- This single-process MVP does not guarantee audit record persistence during hard
-  process kills (SIGKILL / taskkill / unhandled OS termination) or abrupt runtime shutdowns.
 """
 
 from __future__ import annotations
@@ -29,7 +15,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Union
 
 from fastapi import Request
 from langgraph.checkpoint.memory import MemorySaver
@@ -41,7 +27,16 @@ from sqlalchemy.orm import Session
 from app.agents.exception_analysis import ExceptionAnalysisAgent
 from app.agents.financial_review import FinancialReviewAgent
 from app.database.database import SessionLocal
-from app.database.models import AuditTrailRecord, ExceptionRecord, ReconciliationResult, ReconciliationRun
+from app.database.models import (
+    AuditTrailRecord,
+    BankAccount,
+    BankTransaction,
+    ExceptionRecord,
+    JournalEntry,
+    JournalLine,
+    ReconciliationResult,
+    ReconciliationRun,
+)
 from app.financial_engine.accrual import AccrualEngine
 from app.financial_engine.ap import APEngine
 from app.financial_engine.depreciation import DepreciationEngine
@@ -75,13 +70,7 @@ class RunNotFoundError(Exception):
 
 
 class ObservabilityStorageError(Exception):
-    """Raised when an underlying database read or write fails during observability operations.
-
-    To protect against sensitive data leakage (credentials, connection strings, SQL queries,
-    file paths), all public exception messages are generic: 'Observability storage unavailable'.
-    Underlying raw exceptions must only be preserved as chained causes (__cause__) and logged
-    securely to server logs.
-    """
+    """Raised when an underlying database read or write fails during observability operations."""
 
     DEFAULT_MESSAGE = "Observability storage unavailable"
 
@@ -90,15 +79,7 @@ class ObservabilityStorageError(Exception):
 
 
 def canonicalize_details(details: Any) -> str:
-    """Canonically normalize details dictionary/payload to a sorted, compact JSON string.
-
-    Handles:
-    - None -> empty dict
-    - JSON-encoded strings -> parsed to Python structures first
-    - normalize_json_safe for numbers, dates, UUIDs, decimals, models
-    - Recursively sorts dictionary keys via sort_keys=True
-    - Strips extraneous whitespace via separators=(',', ':')
-    """
+    """Canonically normalize details dictionary/payload to a sorted, compact JSON string."""
     if details is None:
         details = {}
     elif isinstance(details, str):
@@ -113,7 +94,6 @@ def canonicalize_details(details: Any) -> str:
 _current_mcp_calls: contextvars.ContextVar[Optional[List[Dict[str, Any]]]] = contextvars.ContextVar(
     "_current_mcp_calls", default=None
 )
-
 
 def _build_production_deps(
     session_factory: Callable[[], Session],
@@ -194,9 +174,9 @@ def _build_production_deps(
             limit = int(input_params.get("limit", 50))
             period = input_params.get("period")
 
-            account_codes = []
+            reconciliation_accounts = []
             if account_code and str(account_code).strip():
-                account_codes = [str(account_code).strip()]
+                reconciliation_accounts = [{"account_code": str(account_code).strip()}]
             else:
                 db = session_factory()
                 try:
@@ -207,18 +187,43 @@ def _build_production_deps(
                         BankAccount.is_active == True,
                         Account.is_active == True
                     ).all()
-                    account_codes = sorted({gl.account_code for bank, gl in bank_accounts
-                        if gl.organization_id == mcp_tools.organization_id and bank.organization_id == mcp_tools.organization_id})
+                    reconciliation_accounts = [
+                        {
+                            "account_id": gl.id,
+                            "account_code": gl.account_code or gl.account_name,
+                            "bank_account_id": bank.id,
+                            "currency_code": bank.currency_code,
+                        }
+                        for bank, gl in bank_accounts
+                        if gl.organization_id == mcp_tools.organization_id and bank.organization_id == mcp_tools.organization_id
+                    ]
                 finally:
                     db.close()
 
-            if not account_codes:
+            if not reconciliation_accounts:
                 raise ValueError("No eligible bank accounts found for reconciliation.")
 
             accounts_data = []
-            for acct in account_codes:
-                gl_records = await fetch_all(f"query_gl_transactions_{acct}", mcp_tools.query_gl_transactions, account_code=acct, limit=limit, fiscal_period=period)
-                bank_records = await fetch_all(f"query_bank_transactions_{acct}", mcp_tools.query_bank_transactions, account_code=acct, limit=limit, fiscal_period=period)
+            for account in reconciliation_accounts:
+                acct = account["account_code"]
+                gl_records = await fetch_all(
+                    f"query_gl_transactions_{acct}",
+                    mcp_tools.query_gl_transactions,
+                    account_code=account.get("account_code"),
+                    account_id=account.get("account_id"),
+                    currency_code=account.get("currency_code"),
+                    limit=limit,
+                    fiscal_period=period,
+                )
+                bank_records = await fetch_all(
+                    f"query_bank_transactions_{acct}",
+                    mcp_tools.query_bank_transactions,
+                    account_code=account.get("account_code"),
+                    account_id=account.get("account_id"),
+                    bank_account_id=account.get("bank_account_id"),
+                    limit=limit,
+                    fiscal_period=period,
+                )
 
                 accounts_data.append({
                     "account_code": acct,
@@ -536,8 +541,35 @@ def _build_production_deps(
                         db.add(recon_res)
                         db.flush()
 
+                    target_period = item.get("period") or effective_period
                     existing = db.get(ExceptionRecord, exc_id)
                     if existing is None:
+                        if gl_line_id:
+                            existing = db.query(ExceptionRecord).filter(
+                                ExceptionRecord.period == target_period,
+                                ExceptionRecord.journal_line_id == gl_line_id,
+                            ).first()
+                        elif bank_tx_id:
+                            existing = db.query(ExceptionRecord).filter(
+                                ExceptionRecord.period == target_period,
+                                ExceptionRecord.bank_transaction_id == bank_tx_id,
+                            ).first()
+                        else:
+                            desc = str(item.get("description", ""))
+                            existing = db.query(ExceptionRecord).filter(
+                                ExceptionRecord.period == target_period,
+                                ExceptionRecord.category == item.get("category", category),
+                                ExceptionRecord.description == desc,
+                            ).first()
+
+                    if existing is not None:
+                        existing.run_id = current_run.id
+                        if recon_res_id:
+                            existing.reconciliation_result_id = recon_res_id
+                        existing.amount_variance = Decimal(str(item.get("amount_variance", 0.0)))
+                        item["id"] = existing.id
+                        item["status"] = existing.status
+                    else:
                         created_at_val = item.get("created_at")
                         if isinstance(created_at_val, str):
                             try:
@@ -557,7 +589,7 @@ def _build_production_deps(
                             run_id=current_run.id,
                             journal_line_id=gl_line_id,
                             bank_transaction_id=bank_tx_id,
-                            period=item.get("period") or effective_period,
+                            period=target_period,
                             category=item.get("category", category),
                             severity=item.get("severity", "MEDIUM"),
                             amount_variance=Decimal(str(item.get("amount_variance", 0.0))),
@@ -566,6 +598,23 @@ def _build_production_deps(
                             created_at=dt,
                         )
                         db.add(rec)
+
+                # Update is_reconciled on matched transaction lines
+                matches = validation_results.get("matches") or validation_results.get("matched") or []
+                for m in matches:
+                    gl_rec = m.get("gl_record") or {}
+                    bank_rec = m.get("bank_record") or {}
+                    gl_id = gl_rec.get("id")
+                    bank_id = bank_rec.get("id")
+                    if gl_id:
+                        jl = db.get(JournalLine, gl_id)
+                        if jl:
+                            jl.is_reconciled = True
+                    if bank_id:
+                        bt = db.get(BankTransaction, bank_id)
+                        if bt:
+                            bt.is_reconciled = True
+
                 db.commit()
                 committed = True
             except Exception as e:
@@ -580,7 +629,10 @@ def _build_production_deps(
                         pass
                 db.close()
 
-        return serialized
+        # Incremental Reconciliation: Filter out exceptions that are already RESOLVED in the database.
+        # Only active breaks (OPEN or IN_REVIEW) are forwarded to AI agents and the HITL approval gate.
+        active_exceptions = [item for item in serialized if item.get("status") != "RESOLVED"]
+        return active_exceptions
 
     async def run_agent_1(exceptions: List[Dict[str, Any]], validation_results: Dict[str, Any]) -> Dict[str, Any]:
         """Execute Agent 1 (Financial Review Agent)."""
@@ -1131,27 +1183,239 @@ class WorkflowService:
                 return dict(cached)
         return await asyncio.to_thread(self._load_persisted_snapshot, run_id)
 
-    async def list_pending_approvals(self) -> List[Dict[str, Any]]:
-        """List all active runs currently paused at the HITL gate."""
-        pending: List[Dict[str, Any]] = []
+    def _build_proposed_entries(self, exceptions: List[Dict[str, Any]], recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Generate structured proposed adjusting journal entries with accounting DR/CR classification."""
+        proposed_entries = []
+        for idx, exc in enumerate(exceptions):
+            amt = abs(float(exc.get("amount_variance") or exc.get("amount") or 0.0))
+            desc = exc.get("description", "")
+            meta = exc.get("metadata", {})
+            rec = next((r for r in recommendations if r.get("exception_id") == exc.get("id")), None)
+            rec_action = rec.get("action", "") if rec else ""
 
+            is_bank_source = meta.get("source") == "BANK" or "bank" in desc.lower()
+            is_fee = any(w in desc.lower() for w in ["fee", "charge", "sc-", "pb-", "tariff", "comm"])
+
+            if is_bank_source and is_fee:
+                dr_acct = "6100 - Bank Service Charges & Fees"
+                cr_acct = "1010 - Cash at Bank (Operating)"
+                action_type = "POST_ADJUSTMENT"
+            elif is_bank_source and (float(exc.get("amount_variance", 0.0)) < 0 or "eft" in desc.lower() or "wire" in desc.lower()):
+                dr_acct = "2000 - Accounts Payable Clearing"
+                cr_acct = "1010 - Cash at Bank (Operating)"
+                action_type = "POST_ADJUSTMENT"
+            elif is_bank_source:
+                dr_acct = "1010 - Cash at Bank (Operating)"
+                cr_acct = "1100 - Accounts Receivable / Unapplied Receipts"
+                action_type = "POST_ADJUSTMENT"
+            else:
+                dr_acct = "Reconciling Timing Item"
+                cr_acct = "General Ledger (No Entry Needed)"
+                action_type = "TIMING_DIFFERENCE"
+
+            proposed_entries.append({
+                "entry_number": idx + 1,
+                "exception_id": exc.get("id"),
+                "action_type": action_type,
+                "description": desc,
+                "debit_account": dr_acct,
+                "credit_account": cr_acct,
+                "amount": amt,
+                "recommended_action": rec_action or "Post adjusting journal entry to ledger.",
+                "policy_citation": "ACC-001 Bank Reconciliation Standard",
+            })
+        return proposed_entries
+
+    async def list_pending_approvals(self) -> List[Dict[str, Any]]:
+        """List all active runs currently paused at the HITL gate with full financial context."""
+        pending_by_id: Dict[str, Dict[str, Any]] = {}
+
+        # 1. Check in-memory runs first
         async with self._reservation_lock:
             active_run_ids = list(self._runs.keys())
 
         for run_id in active_run_ids:
             config = self._get_thread_config(run_id)
-            snapshot = await self.graph.aget_state(config)
+            try:
+                snapshot = await self.graph.aget_state(config)
+            except Exception:
+                snapshot = None
+
             if snapshot and snapshot.next and "hitl_gate" in snapshot.next:
-                values = snapshot.values
-                pending.append({
+                values = snapshot.values or {}
+                exceptions = values.get("exceptions", [])
+                recommendations = values.get("recommendations", [])
+                pending_by_id[run_id] = {
                     "run_id": run_id,
                     "workflow_type": values.get("workflow_type", "reconciliation"),
                     "period": values.get("period", ""),
-                    "exceptions_count": len(values.get("exceptions", [])),
-                    "recommendations": values.get("recommendations", []),
-                })
+                    "exceptions_count": len(exceptions),
+                    "exceptions": exceptions,
+                    "recommendations": recommendations,
+                    "agent_1_review": values.get("agent_1_review", {}),
+                    "agent_2_analyses": values.get("agent_2_analyses", []),
+                    "validation_results": values.get("validation_results", {}),
+                    "proposed_journal_entries": self._build_proposed_entries(exceptions, recommendations),
+                    "created_at": self._runs.get(run_id, {}).get("created_at", ""),
+                }
 
-        return pending
+        # 2. Check persisted database audit events for pending HITL runs across server restarts
+        def _get_persisted_pending_run_ids() -> List[str]:
+            try:
+                records = self._query_audit_records()
+            except Exception:
+                return []
+
+            runs_map: Dict[str, List[AuditTrailRecord]] = {}
+            for r in records:
+                if r.run_id:
+                    runs_map.setdefault(r.run_id, []).append(r)
+
+            pending_ids = []
+            for rid, rlist in runs_map.items():
+                event_types = {r.event_type for r in rlist}
+                if "HITL_PENDING" in event_types and not ("HITL_DECISION" in event_types or "RUN_COMPLETED" in event_types or "RUN_ERROR" in event_types):
+                    pending_ids.append(rid)
+            return pending_ids
+
+        db_pending_ids = await asyncio.to_thread(_get_persisted_pending_run_ids)
+        for run_id in db_pending_ids:
+            if run_id in pending_by_id:
+                continue
+            persisted = await asyncio.to_thread(self._load_persisted_snapshot, run_id)
+            if persisted and persisted.get("status") in ("hitl_pending", "paused", "pending"):
+                exceptions = persisted.get("exceptions", [])
+                recommendations = persisted.get("recommendations", [])
+                pending_by_id[run_id] = {
+                    "run_id": run_id,
+                    "workflow_type": persisted.get("workflow_type", "reconciliation"),
+                    "period": persisted.get("period", ""),
+                    "exceptions_count": len(exceptions),
+                    "exceptions": exceptions,
+                    "recommendations": recommendations,
+                    "agent_1_review": persisted.get("agent_1_review", {}),
+                    "agent_2_analyses": persisted.get("agent_2_analyses", []),
+                    "validation_results": persisted.get("validation_results", {}),
+                    "proposed_journal_entries": self._build_proposed_entries(exceptions, recommendations),
+                    "created_at": persisted.get("created_at", ""),
+                }
+
+        # Filter candidate pending runs:
+        # A run is only genuinely pending if at least one exception for this period is still OPEN or IN_REVIEW in the database.
+        active_pending: List[Dict[str, Any]] = []
+        if self.session_factory:
+            try:
+                db = self.session_factory()
+                for run_dict in pending_by_id.values():
+                    period_val = run_dict.get("period")
+                    if period_val:
+                        open_count = db.query(ExceptionRecord).filter(
+                            ExceptionRecord.period == period_val,
+                            ExceptionRecord.status.in_(["OPEN", "IN_REVIEW"]),
+                        ).count()
+                        if open_count > 0:
+                            active_pending.append(run_dict)
+                        else:
+                            # Auto-settle superseded run
+                            rid = run_dict.get("run_id")
+                            if rid:
+                                self._persist_audit_event(
+                                    f"{rid}_RUN_AUTO_SETTLED",
+                                    rid,
+                                    "RUN_COMPLETED",
+                                    {"status": "completed", "reason": "All exceptions settled in period"},
+                                )
+                    else:
+                        active_pending.append(run_dict)
+                db.close()
+            except Exception as e:
+                logger.debug("Failed to verify live exception status for pending runs: %s", e)
+                active_pending = list(pending_by_id.values())
+        else:
+            active_pending = list(pending_by_id.values())
+
+        return sorted(active_pending, key=lambda r: (r.get("created_at") or "", r.get("run_id", "")), reverse=True)
+
+    def _update_db_exceptions_status(
+        self,
+        run_id: str,
+        exceptions: List[Dict[str, Any]],
+        decision: str,
+        reviewer: str,
+        comments: str,
+        approved_ids: Optional[Set[str]] = None,
+        held_ids: Optional[Set[str]] = None,
+    ) -> None:
+        """Update database ExceptionRecord rows based on the human review decision."""
+        if not self.session_factory:
+            return
+        try:
+            db = self.session_factory()
+        except Exception:
+            return
+
+        try:
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+            for exc in exceptions:
+                exc_id = exc.get("id")
+                if not exc_id:
+                    continue
+                rec = db.get(ExceptionRecord, exc_id)
+                if not rec:
+                    continue
+
+                if decision == "approved":
+                    if approved_ids is not None:
+                        if exc_id in approved_ids:
+                            rec.status = "RESOLVED"
+                            rec.resolved_at = now_utc
+                            rec.assigned_to = reviewer or "Controller"
+                            if rec.journal_line_id:
+                                jl = db.get(JournalLine, rec.journal_line_id)
+                                if jl:
+                                    jl.is_reconciled = True
+                            if rec.bank_transaction_id:
+                                bt = db.get(BankTransaction, rec.bank_transaction_id)
+                                if bt:
+                                    bt.is_reconciled = True
+                            if rec.reconciliation_result_id:
+                                rr = db.get(ReconciliationResult, rec.reconciliation_result_id)
+                                if rr:
+                                    rr.status = "RESOLVED"
+                                    rr.result_status = "RESOLVED"
+                        else:
+                            rec.status = "IN_REVIEW"
+                            rec.assigned_to = reviewer or "Controller"
+                    else:
+                        rec.status = "RESOLVED"
+                        rec.resolved_at = now_utc
+                        rec.assigned_to = reviewer or "Controller"
+                        if rec.journal_line_id:
+                            jl = db.get(JournalLine, rec.journal_line_id)
+                            if jl:
+                                jl.is_reconciled = True
+                        if rec.bank_transaction_id:
+                            bt = db.get(BankTransaction, rec.bank_transaction_id)
+                            if bt:
+                                bt.is_reconciled = True
+                        if rec.reconciliation_result_id:
+                            rr = db.get(ReconciliationResult, rec.reconciliation_result_id)
+                            if rr:
+                                rr.status = "RESOLVED"
+                                rr.result_status = "RESOLVED"
+                else:  # rejected
+                    rec.status = "IN_REVIEW"
+                    rec.assigned_to = reviewer or "Controller"
+
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.warning("Failed to update ExceptionRecords status: %s", e)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
 
     async def resume_decision(
         self,
@@ -1159,8 +1423,10 @@ class WorkflowService:
         decision: str,
         reviewer: str = "",
         comments: str = "",
+        approved_entry_ids: Optional[List[str]] = None,
+        held_entry_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Resume a paused workflow with a human decision under a per-run lock."""
+        """Resume a paused workflow with a human decision (full or selective) under a per-run lock."""
         # Normalize decision case-insensitively to "approved" or "rejected"
         normalized = str(decision).strip().lower()
         if normalized not in ("approved", "rejected"):
@@ -1171,25 +1437,58 @@ class WorkflowService:
         run_lock = await self._get_run_lock(run_id)
         async with run_lock:
             config = self._get_thread_config(run_id)
-            snapshot = await self.graph.aget_state(config)
+            try:
+                snapshot = await self.graph.aget_state(config)
+            except Exception:
+                snapshot = None
 
+            persisted_state = None
             if snapshot is None or not snapshot.values:
-                raise RunNotFoundError(f"Run ID '{run_id}' not found.")
+                persisted_state = await asyncio.to_thread(self._load_persisted_snapshot, run_id)
+                if persisted_state is None:
+                    raise RunNotFoundError(f"Run ID '{run_id}' not found.")
 
-            current_status = snapshot.values.get("status", "unknown")
-            if not (snapshot.next and "hitl_gate" in snapshot.next):
+            current_status = snapshot.values.get("status", "unknown") if (snapshot and snapshot.values) else (persisted_state.get("status", "unknown") if persisted_state else "unknown")
+            is_live_hitl = bool(snapshot and snapshot.next and "hitl_gate" in snapshot.next)
+            is_persisted_hitl = bool(persisted_state and persisted_state.get("status") in ("hitl_pending", "paused", "pending"))
+
+            if not (is_live_hitl or is_persisted_hitl):
                 raise RunConflictError(
                     f"Run ID '{run_id}' has already completed with status '{current_status}' and cannot be resumed."
                 )
+
+            async with self._reservation_lock:
+                cached = dict(self._runs.get(run_id, {}))
+            if not cached and persisted_state:
+                cached = dict(persisted_state)
+
+            all_exceptions = cached.get("exceptions", [])
+            total_exceptions_count = len(all_exceptions)
+
+            approved_set = set(approved_entry_ids) if approved_entry_ids is not None else None
+            held_set = set(held_entry_ids) if held_entry_ids is not None else None
+
+            if normalized == "approved":
+                if approved_set is not None:
+                    approved_count = len(approved_set)
+                    held_count = total_exceptions_count - approved_count
+                else:
+                    approved_count = total_exceptions_count
+                    held_count = 0
+            else:
+                approved_count = 0
+                held_count = total_exceptions_count
 
             resume_payload = {
                 "decision": normalized,
                 "reviewer": reviewer,
                 "comments": comments,
+                "approved_entry_ids": list(approved_set) if approved_set is not None else [e.get("id") for e in all_exceptions if e.get("id")],
+                "held_entry_ids": list(held_set) if held_set is not None else [],
+                "approved_count": approved_count,
+                "held_count": held_count,
             }
 
-            async with self._reservation_lock:
-                cached = dict(self._runs.get(run_id, {}))
             created_at = cached.get("created_at", "")
             decision_snapshot = {**resume_payload, "created_at": created_at}
             await asyncio.to_thread(
@@ -1200,10 +1499,26 @@ class WorkflowService:
                 decision_snapshot,
             )
 
+            # Update DB exception records
+            await asyncio.to_thread(
+                self._update_db_exceptions_status,
+                run_id,
+                all_exceptions,
+                normalized,
+                reviewer,
+                comments,
+                approved_set,
+                held_set,
+            )
+
             t_start = time.monotonic()
             terminal_recorded = False
             try:
-                resumed_result = await self.graph.ainvoke(Command(resume=resume_payload), config=config)
+                if is_live_hitl:
+                    resumed_result = await self.graph.ainvoke(Command(resume=resume_payload), config=config)
+                else:
+                    resumed_result = dict(cached)
+                    resumed_result["status"] = normalized
 
                 final_status = resumed_result.get("status", normalized)
                 trace_log = resumed_result.get("trace_log", [])
@@ -1257,6 +1572,8 @@ class WorkflowService:
                     "decision": normalized,
                     "reviewer": reviewer,
                     "comments": comments,
+                    "approved_count": approved_count,
+                    "held_count": held_count,
                 }
             except (RunConflictError, ObservabilityStorageError):
                 raise
@@ -1535,7 +1852,7 @@ class WorkflowService:
                     JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
                 ).filter(JournalLine.account_id == gl.id,
                     JournalEntry.organization_id == gl.organization_id,
-                    JournalEntry.currency_code == gl.currency_code,
+                    JournalEntry.currency_code == bank.currency_code,
                     ledger_period_filter(JournalEntry.fiscal_period, JournalEntry.entry_date, period)
                 ).count()
                 bank_count = db.query(BankTransaction).filter(
