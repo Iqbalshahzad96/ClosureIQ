@@ -32,7 +32,11 @@ export default function LatestWorkflowCard({
   };
 
   return (
-    <section className="card" style={{ marginBottom: '2rem' }} aria-labelledby="latest-workflow-title">
+    <section
+      className="card overview-latest-card"
+      aria-labelledby="latest-workflow-title"
+      data-testid="latest-workflow-executions"
+    >
       <div
         style={{
           display: 'flex',
@@ -46,7 +50,7 @@ export default function LatestWorkflowCard({
           style={{ fontSize: '1.15rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}
         >
           <Activity size={20} color="var(--primary)" aria-hidden="true" />
-          Latest Workflow Execution
+          Latest Workflow Executions
         </h2>
         {latestRun && (
           <StatusBadge
@@ -71,9 +75,9 @@ export default function LatestWorkflowCard({
           icon={Activity}
         />
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1.25rem' }}>
+        <div className="overview-execution-grid">
           {/* Run ID & Type */}
-          <div style={{ background: 'rgba(17, 24, 39, 0.4)', padding: '0.9rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+          <div className="overview-execution-detail">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '0.35rem' }}>
               <Terminal size={14} aria-hidden="true" />
               <span>Run ID & Type</span>
@@ -87,7 +91,7 @@ export default function LatestWorkflowCard({
           </div>
 
           {/* Close Period */}
-          <div style={{ background: 'rgba(17, 24, 39, 0.4)', padding: '0.9rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+          <div className="overview-execution-detail">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '0.35rem' }}>
               <Calendar size={14} aria-hidden="true" />
               <span>Financial Period</span>
@@ -101,7 +105,7 @@ export default function LatestWorkflowCard({
           </div>
 
           {/* Exceptions Detected */}
-          <div style={{ background: 'rgba(17, 24, 39, 0.4)', padding: '0.9rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+          <div className="overview-execution-detail">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '0.35rem' }}>
               <FileWarning size={14} aria-hidden="true" />
               <span>Exceptions Detected</span>
@@ -115,7 +119,7 @@ export default function LatestWorkflowCard({
           </div>
 
           {/* SOP Recommendations */}
-          <div style={{ background: 'rgba(17, 24, 39, 0.4)', padding: '0.9rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+          <div className="overview-execution-detail">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '0.35rem' }}>
               <Lightbulb size={14} aria-hidden="true" />
               <span>Agent Recommendations</span>
@@ -129,7 +133,7 @@ export default function LatestWorkflowCard({
           </div>
 
           {/* Execution Latency */}
-          <div style={{ background: 'rgba(17, 24, 39, 0.4)', padding: '0.9rem 1rem', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-subtle)' }}>
+          <div className="overview-execution-detail">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '0.35rem' }}>
               <Clock size={14} aria-hidden="true" />
               <span>Workflow Latency</span>

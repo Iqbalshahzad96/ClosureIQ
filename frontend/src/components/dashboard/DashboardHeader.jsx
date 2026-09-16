@@ -28,7 +28,7 @@ export default function DashboardHeader({
       >
         <div>
           <h1 style={{ fontSize: '1.75rem', fontWeight: 700, marginBottom: '0.5rem' }}>
-            ClosureIQ — AI-Powered Financial Close Assistant
+            ClosureIQ: Intelligent Financial Engine
           </h1>
           <p style={{ color: 'var(--text-secondary)', maxWidth: '750px', fontSize: '0.95rem' }}>
             Accelerate month-end closing with deterministic financial matching, dual AI reasoning agents,

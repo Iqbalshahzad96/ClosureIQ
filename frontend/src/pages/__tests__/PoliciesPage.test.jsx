@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import PoliciesPage from '../PoliciesPage';
 
@@ -80,6 +80,47 @@ describe('PoliciesPage', () => {
     expect(screen.getByText('Accrual & Expense Matching')).toBeInTheDocument();
     expect(screen.getByText('ACC-001_bank_reconciliation.md')).toBeInTheDocument();
     expect(screen.getByText('ACC-002_accrual_policy.md')).toBeInTheDocument();
+  });
+
+  it('hides upload metadata controls while preserving default upload metadata and the table Category column', async () => {
+    render(<PoliciesPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Current Policy Files \(2\)/i)).toBeInTheDocument();
+    });
+
+    const uploadCard = screen.getByRole('heading', { name: /Upload Policy \/ SOP Document/i }).closest('.card');
+    expect(within(uploadCard).queryByText(/^Category:$/i)).not.toBeInTheDocument();
+    expect(within(uploadCard).queryByText(/^Policy Identifier:$/i)).not.toBeInTheDocument();
+    expect(within(uploadCard).queryByPlaceholderText(/SOP-REV-01/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Category' })).toBeInTheDocument();
+
+    const initialFile = new File(['# Initial policy'], 'ACC-008_initial_policy.md', {
+      type: 'text/markdown',
+    });
+    const policyFile = new File(['# Policy content'], 'ACC-009_close_checklist.md', {
+      type: 'text/markdown',
+    });
+    fireEvent.change(uploadCard.querySelector('input[type="file"]'), {
+      target: { files: [initialFile] },
+    });
+    fireEvent.change(uploadCard.querySelector('input[type="file"]'), {
+      target: { files: [policyFile] },
+    });
+    fireEvent.click(within(uploadCard).getByRole('button', { name: /Ingest & Index Policy/i }));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/rag/upload'),
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+
+    const uploadCall = global.fetch.mock.calls.find(([url, options]) => (
+      String(url).includes('/rag/upload') && options?.method === 'POST'
+    ));
+    expect(uploadCall[1].body.get('category')).toBe('RECONCILIATION');
+    expect(uploadCall[1].body.get('policy_id')).toBe('ACC-009_close_checklist');
   });
 
   it('handles direct array response compatibility', async () => {
@@ -208,7 +249,8 @@ describe('PoliciesPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Accruals should be reviewed under ACC-002.')).toBeInTheDocument();
     });
-    expect(screen.getByText('[ACC-002] Accrual & Expense Matching')).toBeInTheDocument();
+    expect(screen.queryByText(/^Citations$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('[ACC-002] Accrual & Expense Matching')).not.toBeInTheDocument();
 
     fireEvent.change(input, { target: { value: 'What about follow up?' } });
     fireEvent.click(screen.getByRole('button', { name: /ask policy question/i }));

@@ -9,7 +9,7 @@ export default function Sidebar({ activeTab, setActiveTab }) {
     { id: 'exceptions', label: 'Exceptions', icon: AlertTriangle },
     { id: 'approvals', label: 'Approvals (HITL)', icon: CheckSquare },
     { id: 'policies', label: 'Policies & SOPs', icon: BookOpen },
-    { id: 'observability', label: 'Observability', icon: LineChart },
+    // { id: 'observability', label: 'Observability', icon: LineChart },
   ];
 
   return (
