@@ -410,7 +410,7 @@ export default function FinancialUploadPage({ setActiveTab }) {
                   }}
                 >
                   <Upload size={16} />
-                  <span>Upload and Import</span>
+                  <span>Upload</span>
                 </button>
               </div>
             )}

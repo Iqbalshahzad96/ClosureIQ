@@ -27,7 +27,7 @@ export default function PoliciesPage() {
   const [deletingId, setDeletingId] = useState(null);
   const [expandedDocIds, setExpandedDocIds] = useState(() => new Set());
   const [selectedFile, setSelectedFile] = useState(null);
-  const [category, setCategory] = useState('RECONCILIATION');
+  const [category] = useState('RECONCILIATION');
   const [policyId, setPolicyId] = useState('');
   const [uploadSuccess, setUploadSuccess] = useState(null);
   const [error, setError] = useState(null);
@@ -68,11 +68,9 @@ export default function PoliciesPage() {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       setSelectedFile(file);
-      if (!policyId) {
-        // Auto-populate policy ID from filename
-        const baseName = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_');
-        setPolicyId(baseName);
-      }
+      // Keep the hidden policy ID aligned with the currently selected filename.
+      const baseName = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_');
+      setPolicyId(baseName);
     }
   };
 
@@ -262,53 +260,6 @@ export default function PoliciesPage() {
               />
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '0.825rem', color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
-                  Category:
-                </label>
-                <select
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '0.5rem',
-                    borderRadius: 'var(--radius-sm)',
-                    border: '1px solid var(--border-color)',
-                    background: 'var(--bg-primary)',
-                    color: 'var(--text-primary)',
-                    fontSize: '0.85rem',
-                  }}
-                >
-                  <option value="RECONCILIATION">Reconciliation</option>
-                  <option value="ACCRUAL">Accrual SOP</option>
-                  <option value="DEPRECIATION">Depreciation SOP</option>
-                  <option value="GENERAL_CLOSE">General Close</option>
-                </select>
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '0.825rem', color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
-                  Policy Identifier:
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. SOP-REV-01"
-                  value={policyId}
-                  onChange={(e) => setPolicyId(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '0.5rem',
-                    borderRadius: 'var(--radius-sm)',
-                    border: '1px solid var(--border-color)',
-                    background: 'var(--bg-primary)',
-                    color: 'var(--text-primary)',
-                    fontSize: '0.85rem',
-                  }}
-                />
-              </div>
-            </div>
-
             <button
               type="submit"
               className="button button-primary"
@@ -381,16 +332,6 @@ export default function PoliciesPage() {
                   <p style={{ color: 'var(--text-primary)', fontSize: '0.82rem', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                     {message.content}
                   </p>
-                  {Array.isArray(message.citations) && message.citations.length > 0 && (
-                    <div style={{ marginTop: '0.55rem', display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
-                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Citations</span>
-                      {message.citations.map((citation, cIdx) => (
-                        <span key={cIdx} style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
-                          {citation.citation || citation.policy_id || citation.policy_name || `Citation ${cIdx + 1}`}
-                        </span>
-                      ))}
-                    </div>
-                  )}
                 </div>
               ))
             )}

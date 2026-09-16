@@ -1,18 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowRight } from 'lucide-react';
 import DashboardHeader from '../components/dashboard/DashboardHeader';
 import OverviewMetrics from '../components/dashboard/OverviewMetrics';
 import LatestWorkflowCard from '../components/dashboard/LatestWorkflowCard';
-import ExceptionsOverview from '../components/dashboard/ExceptionsOverview';
-import ObservabilitySummary from '../components/dashboard/ObservabilitySummary';
-import IngestionStatusCard from '../components/dashboard/IngestionStatusCard';
-import AgentArchitectureBanner from '../components/dashboard/AgentArchitectureBanner';
 
 import {
   fetchReconciliationSummary,
   fetchExceptions,
   fetchPendingApprovals,
-  fetchObservabilityMetrics,
   fetchObservabilityRuns,
 } from '../services/dashboardService';
 
@@ -20,7 +14,6 @@ import {
   normalizeSummary,
   normalizeExceptions,
   normalizeApprovals,
-  normalizeMetrics,
   normalizeRuns,
 } from '../services/dashboardNormalizers';
 
@@ -43,12 +36,6 @@ export default function DashboardPage({ setActiveTab }) {
     data: normalizeApprovals([]),
   });
 
-  const [metricsState, setMetricsState] = useState({
-    loading: true,
-    error: null,
-    data: normalizeMetrics(null),
-  });
-
   const [runsState, setRunsState] = useState({
     loading: true,
     error: null,
@@ -63,7 +50,6 @@ export default function DashboardPage({ setActiveTab }) {
     summary: null,
     exceptions: null,
     approvals: null,
-    metrics: null,
     runs: null,
   });
 
@@ -71,7 +57,6 @@ export default function DashboardPage({ setActiveTab }) {
     summary: 0,
     exceptions: 0,
     approvals: 0,
-    metrics: 0,
     runs: 0,
   });
 
@@ -93,7 +78,6 @@ export default function DashboardPage({ setActiveTab }) {
       summary: setSummaryState,
       exceptions: setExceptionsState,
       approvals: setApprovalsState,
-      metrics: setMetricsState,
       runs: setRunsState,
     };
 
@@ -101,7 +85,6 @@ export default function DashboardPage({ setActiveTab }) {
       summary: fetchReconciliationSummary,
       exceptions: fetchExceptions,
       approvals: fetchPendingApprovals,
-      metrics: fetchObservabilityMetrics,
       runs: fetchObservabilityRuns,
     };
 
@@ -109,7 +92,6 @@ export default function DashboardPage({ setActiveTab }) {
       summary: normalizeSummary,
       exceptions: normalizeExceptions,
       approvals: normalizeApprovals,
-      metrics: normalizeMetrics,
       runs: normalizeRuns,
     };
 
@@ -157,7 +139,7 @@ export default function DashboardPage({ setActiveTab }) {
   }, []);
 
   /**
-   * Global refresh: fetches all 5 sections concurrently using Promise.allSettled.
+   * Global refresh: fetches all retained sections concurrently using Promise.allSettled.
    * Updates 'Last updated' timestamp only if at least one endpoint succeeds.
    */
   const handleRefresh = useCallback(async () => {
@@ -167,7 +149,6 @@ export default function DashboardPage({ setActiveTab }) {
       fetchSection('summary'),
       fetchSection('exceptions'),
       fetchSection('approvals'),
-      fetchSection('metrics'),
       fetchSection('runs'),
     ]);
 
@@ -196,7 +177,7 @@ export default function DashboardPage({ setActiveTab }) {
   }, [handleRefresh]);
 
   return (
-    <main aria-label="ClosureIQ Dashboard">
+    <main className="overview-page" aria-label="ClosureIQ Dashboard">
       {/* Header with Title, Last Updated, and Refresh */}
       <DashboardHeader
         lastUpdated={lastUpdated}
@@ -204,16 +185,14 @@ export default function DashboardPage({ setActiveTab }) {
         onRefresh={handleRefresh}
       />
 
-      {/* KPI Overview Metrics (Status, Active Exceptions, Approvals, Latency) */}
+      {/* Retained close status, exceptions, and approval summaries */}
       <OverviewMetrics
         summaryState={summaryState}
         exceptionsState={exceptionsState}
         approvalsState={approvalsState}
-        metricsState={metricsState}
         onRetrySummary={() => fetchSection('summary')}
         onRetryExceptions={() => fetchSection('exceptions')}
         onRetryApprovals={() => fetchSection('approvals')}
-        onRetryMetrics={() => fetchSection('metrics')}
       />
 
       {/* Latest Workflow Execution Details */}
@@ -226,65 +205,6 @@ export default function DashboardPage({ setActiveTab }) {
         }}
       />
 
-      {/* Financial Exceptions Overview (Category & Severity Breakdown) */}
-      <ExceptionsOverview
-        exceptionsState={exceptionsState}
-        onRetry={() => fetchSection('exceptions')}
-      />
-
-      {/* Observability & Runtime Telemetry (Exact backend fields) */}
-      <ObservabilitySummary
-        metricsState={metricsState}
-        onRetry={() => fetchSection('metrics')}
-      />
-
-      {/* Honest Ingestion Empty / Readiness State */}
-      <IngestionStatusCard />
-
-      {/* Two Specialized AI Agents Banner with Corrected Copy */}
-      <AgentArchitectureBanner />
-
-      {/* Quick Action Navigation */}
-      <nav
-        aria-label="Quick Navigation"
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-          gap: '1rem',
-          marginTop: '1rem',
-        }}
-      >
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={() => setActiveTab && setActiveTab('reconciliation')}
-          style={{ justifyContent: 'space-between', padding: '1rem 1.25rem' }}
-          aria-label="Navigate to Reconciliation Engine"
-        >
-          <span>Open Reconciliation Engine</span>
-          <ArrowRight size={16} aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={() => setActiveTab && setActiveTab('exceptions')}
-          style={{ justifyContent: 'space-between', padding: '1rem 1.25rem' }}
-          aria-label="Navigate to Financial Exceptions"
-        >
-          <span>Inspect Financial Exceptions</span>
-          <ArrowRight size={16} aria-hidden="true" />
-        </button>
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={() => setActiveTab && setActiveTab('approvals')}
-          style={{ justifyContent: 'space-between', padding: '1rem 1.25rem' }}
-          aria-label="Navigate to HITL Approvals"
-        >
-          <span>Review HITL Approvals</span>
-          <ArrowRight size={16} aria-hidden="true" />
-        </button>
-      </nav>
     </main>
   );
 }

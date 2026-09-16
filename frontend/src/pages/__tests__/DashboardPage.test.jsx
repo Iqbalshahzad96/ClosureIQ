@@ -8,12 +8,10 @@ import {
   mockIdleSummary,
   mockExceptions,
   mockPendingApprovals,
-  mockObservabilityMetrics,
   mockObservabilityRuns,
   mockMalformedSummary,
   mockMalformedExceptions,
   mockMalformedApprovals,
-  mockMalformedMetrics,
   mockMalformedRuns,
 } from '../../test/mockData';
 import { selectLatestRun, normalizeExceptions } from '../../services/dashboardNormalizers';
@@ -66,15 +64,6 @@ describe('DashboardPage', () => {
         });
       }
 
-      if (urlStr.includes('/observability/metrics')) {
-        if (handlers.metricsError) return Promise.reject(new Error('Metrics failed'));
-        return Promise.resolve({
-          ok: !handlers.metricsStatus || handlers.metricsStatus === 200,
-          status: handlers.metricsStatus || 200,
-          json: async () => (handlers.metricsData !== undefined ? handlers.metricsData : mockObservabilityMetrics),
-        });
-      }
-
       if (urlStr.includes('/observability/runs')) {
         if (handlers.runsError) return Promise.reject(new Error('Runs failed'));
         return Promise.resolve({
@@ -92,6 +81,27 @@ describe('DashboardPage', () => {
     });
   };
 
+  it('renders only the four retained Overview elements', async () => {
+    setupFetchMock();
+    render(<DashboardPage setActiveTab={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Close Workflow Status')).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('Active Exceptions')).toBeInTheDocument();
+    expect(screen.getByText('Pending HITL Approvals')).toBeInTheDocument();
+    expect(screen.getByText('Latest Workflow Executions')).toBeInTheDocument();
+    expect(screen.getAllByTestId(/^metric-/)).toHaveLength(3);
+    expect(screen.getByTestId('latest-workflow-executions')).toBeInTheDocument();
+
+    expect(screen.queryByText('Observability & Runtime Telemetry')).not.toBeInTheDocument();
+    expect(screen.queryByText('Data Ingestion Pipeline Status')).not.toBeInTheDocument();
+    expect(screen.queryByText('Financial Exception Telemetry')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Agent 1: Exception Review Agent/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Quick Navigation' })).not.toBeInTheDocument();
+  });
+
   // 1. Successful complete response
   it('1. renders all sections with complete successful response data', async () => {
     setupFetchMock();
@@ -108,28 +118,8 @@ describe('DashboardPage', () => {
 
     const approvalsCard = screen.getByTestId('metric-hitl-approvals');
     expect(within(approvalsCard).getByText('1')).toBeInTheDocument(); // 1 pending approval
-    expect(screen.getByText('14 Runs')).toBeInTheDocument();
-
-    // Observability Summary exact backend fields
-    expect(screen.getByText('45,200')).toBeInTheDocument(); // total_token_usage
-    expect(screen.getByText('6')).toBeInTheDocument(); // hitl_approvals_count
-
-    // Corrected Agent copy
-    expect(
-      screen.getByText(/Agent 1: Exception Review Agent/i)
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Classifies exceptions and explains financial context without recalculation/i)
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Agent 2: Exception Analysis Agent/i)
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Performs RAG-grounded investigation and recommendations; does not directly create journal entries/i)
-    ).toBeInTheDocument();
-
-    // Ingestion readiness
-    expect(screen.getByText(/No import status available yet/i)).toBeInTheDocument();
+    expect(screen.getByText('Latest Workflow Executions')).toBeInTheDocument();
+    expect(screen.getByText(mockObservabilityRuns[0].run_id)).toBeInTheDocument();
   });
 
   // 2. Loading state
@@ -148,13 +138,6 @@ describe('DashboardPage', () => {
       summaryData: mockIdleSummary,
       exceptionsData: [],
       approvalsData: [],
-      metricsData: {
-        total_runs: 0,
-        avg_latency_ms: 0,
-        total_token_usage: 0,
-        error_count: 0,
-        hitl_approvals_count: 0,
-      },
       runsData: [],
     });
 
@@ -166,11 +149,7 @@ describe('DashboardPage', () => {
 
     expect(screen.getByText('0 high/critical priority')).toBeInTheDocument();
     expect(screen.getByText('0 checkpoints awaiting review')).toBeInTheDocument();
-    expect(screen.getByText('0 Runs')).toBeInTheDocument();
     expect(screen.getByText(/No workflow runs executed yet/i)).toBeInTheDocument();
-    expect(
-      screen.getByText(/No exception records available\. Run a financial close workflow to generate exception results\./i)
-    ).toBeInTheDocument();
     expect(screen.queryByText(/completely in balance/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/\bNaN\b/)).not.toBeInTheDocument();
   });
@@ -191,8 +170,7 @@ describe('DashboardPage', () => {
 
     // Other sections render normally
     expect(screen.getByText('Clean Close')).toBeInTheDocument();
-    expect(screen.getByText('14 Runs')).toBeInTheDocument();
-    expect(screen.getByText(/No import status available yet/i)).toBeInTheDocument();
+    expect(screen.getByText('Latest Workflow Executions')).toBeInTheDocument();
   });
 
   // 5. All APIs failing with retry
@@ -247,14 +225,13 @@ describe('DashboardPage', () => {
       summaryData: mockMalformedSummary,
       exceptionsData: mockMalformedExceptions,
       approvalsData: mockMalformedApprovals,
-      metricsData: mockMalformedMetrics,
       runsData: mockMalformedRuns,
     });
 
     render(<DashboardPage setActiveTab={vi.fn()} />);
 
     await waitFor(() => {
-      expect(screen.getByText('0 Runs')).toBeInTheDocument();
+      expect(screen.getByText('Idle')).toBeInTheDocument();
     });
 
     expect(screen.queryByText(/\bNaN\b/)).not.toBeInTheDocument();
@@ -326,8 +303,8 @@ describe('DashboardPage', () => {
       expect(refreshBtn).not.toBeDisabled();
     });
 
-    // Verify all 5 endpoints were called again (5 on mount + 5 on refresh)
-    expect(global.fetch).toHaveBeenCalledTimes(10);
+    // Verify all 4 retained data sources were called again (4 on mount + 4 on refresh)
+    expect(global.fetch).toHaveBeenCalledTimes(8);
   });
 
   it('9b. does not update timestamp if every endpoint fails during refresh', async () => {
@@ -451,38 +428,35 @@ describe('DashboardPage', () => {
     expect(screen.queryByText('Rejected')).not.toBeInTheDocument();
   });
 
-  // 11. Ingestion status does not show fabricated data
-  it('11. displays honest ingestion state without fabricated data or upload controls', async () => {
+  // 11. Removed Overview content stays absent
+  it('11. does not render removed telemetry, pipeline, architecture, or action content', async () => {
     setupFetchMock();
     render(<DashboardPage setActiveTab={vi.fn()} />);
 
     await waitFor(() => {
-      expect(screen.getByText(/No import status available yet/i)).toBeInTheDocument();
+      expect(screen.getByText('Latest Workflow Executions')).toBeInTheDocument();
     });
 
-    // Ensure no file upload controls exist on this branch
-    expect(screen.queryByRole('textbox', { type: 'file' })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/upload/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/transactions uploaded/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Observability & Runtime Telemetry')).not.toBeInTheDocument();
+    expect(screen.queryByText('Data Ingestion Pipeline Status')).not.toBeInTheDocument();
+    expect(screen.queryByText('Financial Exception Telemetry')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Agent 1: Exception Review Agent/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Quick Navigation' })).not.toBeInTheDocument();
+    expect(global.fetch).not.toHaveBeenCalledWith(
+      expect.stringContaining('/observability/metrics'),
+      expect.anything()
+    );
   });
 
-  // 12. No existing navigation regression
-  it('12. maintains existing quick action navigation buttons and calls setActiveTab correctly', async () => {
+  // 12. Page-level controls remain unchanged
+  it('12. retains the existing Overview header and refresh control', async () => {
     setupFetchMock();
-    const setActiveTabMock = vi.fn();
-    render(<DashboardPage setActiveTab={setActiveTabMock} />);
+    render(<DashboardPage setActiveTab={vi.fn()} />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Open Reconciliation Engine/i)).toBeInTheDocument();
+      expect(screen.getByText(/ClosureIQ — AI-Powered Financial Close Assistant/i)).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByText(/Open Reconciliation Engine/i));
-    expect(setActiveTabMock).toHaveBeenCalledWith('reconciliation');
-
-    fireEvent.click(screen.getByText(/Inspect Financial Exceptions/i));
-    expect(setActiveTabMock).toHaveBeenCalledWith('exceptions');
-
-    fireEvent.click(screen.getByText(/Review HITL Approvals/i));
-    expect(setActiveTabMock).toHaveBeenCalledWith('approvals');
+    expect(screen.getByRole('button', { name: /refresh dashboard metrics/i })).toBeInTheDocument();
   });
 });
