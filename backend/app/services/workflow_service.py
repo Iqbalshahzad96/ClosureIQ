@@ -179,6 +179,16 @@ def _build_production_deps(
                 run_calls.append(event)
             return records
 
+        async def fetch_all(tool_name, operation, **kwargs):
+            records = []
+            offset = 0
+            while True:
+                batch = await invoke(tool_name, operation, **kwargs, offset=offset)
+                records.extend(batch)
+                if len(batch) < kwargs["limit"]:
+                    return records
+                offset += len(batch)
+
         if workflow_type == "reconciliation":
             account_code = input_params.get("account_code")
             limit = int(input_params.get("limit", 50))
@@ -197,7 +207,8 @@ def _build_production_deps(
                         BankAccount.is_active == True,
                         Account.is_active == True
                     ).all()
-                    account_codes = [gl.account_code for bank, gl in bank_accounts]
+                    account_codes = sorted({gl.account_code for bank, gl in bank_accounts
+                        if gl.organization_id == mcp_tools.organization_id and bank.organization_id == mcp_tools.organization_id})
                 finally:
                     db.close()
 
@@ -206,8 +217,8 @@ def _build_production_deps(
 
             accounts_data = []
             for acct in account_codes:
-                gl_records = await invoke(f"query_gl_transactions_{acct}", mcp_tools.query_gl_transactions, account_code=acct, limit=limit, fiscal_period=period)
-                bank_records = await invoke(f"query_bank_transactions_{acct}", mcp_tools.query_bank_transactions, account_code=acct, limit=limit)
+                gl_records = await fetch_all(f"query_gl_transactions_{acct}", mcp_tools.query_gl_transactions, account_code=acct, limit=limit, fiscal_period=period)
+                bank_records = await fetch_all(f"query_bank_transactions_{acct}", mcp_tools.query_bank_transactions, account_code=acct, limit=limit, fiscal_period=period)
 
                 accounts_data.append({
                     "account_code": acct,
@@ -228,8 +239,19 @@ def _build_production_deps(
             account_code = input_params.get("account_code")
             limit = int(input_params.get("limit", 50))
 
-            if accrual_entries is None and account_code:
-                gl_records = await invoke("query_gl_transactions", mcp_tools.query_gl_transactions, account_code=str(account_code), limit=limit)
+            if accrual_entries is None:
+                period = input_params.get("period", "CURRENT")
+                accounts = ([{"account_code": account_code}] if account_code else
+                    await invoke("query_accrual_accounts", mcp_tools.query_accrual_accounts, fiscal_period=period))
+                if not accounts:
+                    raise ValueError("No eligible accrual accounts with posted activity were found for this period.")
+                gl_records = []
+                for account in accounts:
+                    rows = await fetch_all("query_gl_transactions", mcp_tools.query_gl_transactions,
+                        account_code=account["account_code"], limit=limit, fiscal_period=period)
+                    gl_records.extend(r for r in rows if r.get("entry_status") == "POSTED")
+                if not gl_records:
+                    raise ValueError("No posted accrual transactions were found for this period.")
                 accrual_entries = [
                     {
                         "id": r.get("id"),
@@ -261,8 +283,10 @@ def _build_production_deps(
 
             if asset_records is None:
                 category = input_params.get("category")
-                status_filter = input_params.get("status", "ACTIVE")
-                assets = await invoke("query_fixed_assets", mcp_tools.query_fixed_assets, category=category, status=status_filter, limit=limit)
+                status_filter = input_params.get("status") or "ACTIVE"
+                assets = await fetch_all("query_fixed_assets", mcp_tools.query_fixed_assets, category=category, status=status_filter, limit=limit, fiscal_period=input_params.get("period"))
+                if not assets:
+                    raise ValueError("No eligible fixed assets were found for this period.")
                 asset_records = assets
 
             if period_posted_depreciation is None:
@@ -284,14 +308,19 @@ def _build_production_deps(
             if invoices is None:
                 vendor_name = input_params.get("vendor_name")
                 status_filter = input_params.get("status")
-                fetched = await invoke("query_ap_invoices", mcp_tools.query_ap_invoices, vendor_name=vendor_name, status=status_filter, limit=limit)
+                fetched = await fetch_all("query_ap_invoices", mcp_tools.query_ap_invoices, vendor_name=vendor_name, status=status_filter, limit=limit, fiscal_period=input_params.get("period"))
+                if not fetched:
+                    raise ValueError("No eligible AP invoices were found for this period.")
                 invoices = fetched
 
             if invoices is None:
                 invoices = []
 
             period = input_params.get("period")
-            as_of_date = input_params.get("as_of_date") or (None if period in ("CURRENT", None, "") else period)
+            from app.financial_engine.periods import period_bounds
+            from datetime import timedelta
+            as_of_date = input_params.get("as_of_date") or (
+                (period_bounds(period)[1] - timedelta(days=1)).date().isoformat() if period else None)
 
             return {
                 "invoices": invoices,
@@ -314,6 +343,7 @@ def _build_production_deps(
                 }]
 
             combined_results = {
+                "net_variance": 0.0,
                 "matches": [],
                 "unmatched_gl": [],
                 "unmatched_bank": [],
@@ -329,14 +359,17 @@ def _build_production_deps(
                 gl = acct_data.get("gl_transactions", [])
                 bank = acct_data.get("bank_transactions", [])
                 res = reconciliation_engine.reconcile(gl_transactions=gl, bank_transactions=bank)
-                combined_results["matches"].extend(res.get("matches", []))
+                combined_results["net_variance"] += res.get("net_variance", 0.0)
+                combined_results["matches"].extend(res.get("matched", []))
                 combined_results["unmatched_gl"].extend(res.get("unmatched_gl", []))
                 combined_results["unmatched_bank"].extend(res.get("unmatched_bank", []))
 
-                metrics = res.get("metrics", {})
+                metrics = {**res, "matched_amount": res.get("reconciled_gl_amount", 0.0)}
                 for k in combined_results["metrics"]:
                     combined_results["metrics"][k] += float(metrics.get(k, 0.0))
 
+            combined_results.update(combined_results["metrics"])
+            combined_results["matched"] = combined_results["matches"]
             return combined_results
 
         elif workflow_type == "accrual":
@@ -1496,55 +1529,20 @@ class WorkflowService:
             for bank, gl in bank_accounts:
                 account_code = gl.account_code
 
-                # Handle YYYY vs YYYY-MM for GL
-                if len(period) == 4 and period.isdigit():
-                    gl_count = db.query(JournalLine).join(
-                        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-                    ).filter(
-                        JournalLine.account_id == gl.id,
-                        JournalEntry.fiscal_period.startswith(period)
-                    ).count()
-                else:
-                    gl_count = db.query(JournalLine).join(
-                        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-                    ).filter(
-                        JournalLine.account_id == gl.id,
-                        JournalEntry.fiscal_period == period
-                    ).count()
-
-                # Parse period if YYYY-MM or YYYY
-                bank_count = 0
-                if len(period) == 4 and period.isdigit():
-                    try:
-                        year = int(period)
-                        from datetime import datetime
-                        start_date = datetime(year, 1, 1)
-                        end_date = datetime(year, 12, 31, 23, 59, 59)
-
-                        bank_count = db.query(BankTransaction).filter(
-                            BankTransaction.bank_account_id == bank.id,
-                            BankTransaction.booking_date >= start_date,
-                            BankTransaction.booking_date <= end_date
-                        ).count()
-                    except Exception:
-                        bank_count = db.query(BankTransaction).filter(BankTransaction.bank_account_id == bank.id).count()
-                elif "-" in period:
-                    try:
-                        year, month = map(int, period.split("-")[:2])
-                        from datetime import datetime
-                        import calendar
-                        start_date = datetime(year, month, 1)
-                        end_date = datetime(year, month, calendar.monthrange(year, month)[1], 23, 59, 59)
-
-                        bank_count = db.query(BankTransaction).filter(
-                            BankTransaction.bank_account_id == bank.id,
-                            BankTransaction.booking_date >= start_date,
-                            BankTransaction.booking_date <= end_date
-                        ).count()
-                    except Exception:
-                        bank_count = db.query(BankTransaction).filter(BankTransaction.bank_account_id == bank.id).count()
-                else:
-                    bank_count = db.query(BankTransaction).filter(BankTransaction.bank_account_id == bank.id).count()
+                from app.financial_engine.periods import period_bounds, ledger_period_filter
+                start, end = period_bounds(period)
+                gl_count = db.query(JournalLine).join(
+                    JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+                ).filter(JournalLine.account_id == gl.id,
+                    JournalEntry.organization_id == gl.organization_id,
+                    JournalEntry.currency_code == gl.currency_code,
+                    ledger_period_filter(JournalEntry.fiscal_period, JournalEntry.entry_date, period)
+                ).count()
+                bank_count = db.query(BankTransaction).filter(
+                    BankTransaction.bank_account_id == bank.id,
+                    BankTransaction.currency_code == bank.currency_code,
+                    BankTransaction.booking_date >= start, BankTransaction.booking_date < end
+                ).count()
 
                 preview_data["detected_accounts"].append({
                     "account_code": account_code,
@@ -1658,7 +1656,7 @@ class WorkflowService:
     def get_available_periods(self) -> Dict[str, Any]:
         try:
             db = self.session_factory()
-            from app.database.models import JournalEntry, BankTransaction
+            from app.database.models import JournalEntry, BankTransaction, APInvoice, FixedAsset
 
             # Get distinct periods from JournalEntry
             je_periods = db.query(JournalEntry.fiscal_period).distinct().all()
@@ -1669,6 +1667,12 @@ class WorkflowService:
             for d in bt_dates:
                 if d[0]:
                     periods.add(d[0].strftime("%Y-%m"))
+
+            for model, column in ((APInvoice, APInvoice.invoice_date), (FixedAsset, FixedAsset.in_service_date),
+                                  (FixedAsset, FixedAsset.acquisition_date)):
+                for (value,) in db.query(column).distinct().all():
+                    if value:
+                        periods.add(value.strftime("%Y-%m"))
 
             # Extract yearly periods
             yearly = set([p.split("-")[0] for p in periods if "-" in p])

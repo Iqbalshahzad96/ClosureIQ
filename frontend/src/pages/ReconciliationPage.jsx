@@ -19,9 +19,7 @@ import StatusBadge from '../components/StatusBadge';
 
 export default function ReconciliationPage() {
   const [workflowType, setWorkflowType] = useState('reconciliation');
-  const [accountCode, setAccountCode] = useState('1010');
-  const [period, setPeriod] = useState('2026-Q1');
-  const [limit, setLimit] = useState(50);
+  const [period, setPeriod] = useState('');
 
   const [isRunning, setIsRunning] = useState(false);
   const [runError, setRunError] = useState(null);
@@ -133,9 +131,7 @@ export default function ReconciliationPage() {
     try {
       const result = await runWorkflow({
         workflowType,
-        accountCode: workflowType === 'accrual' ? accountCode : undefined,
         period,
-        limit,
       });
       setRunResult(result);
     } catch (err) {
@@ -214,6 +210,7 @@ export default function ReconciliationPage() {
               Workflow Type
             </label>
             <select
+              aria-label="Workflow Type"
               value={workflowType}
               onChange={(e) => setWorkflowType(e.target.value)}
               style={{
@@ -233,35 +230,13 @@ export default function ReconciliationPage() {
             </select>
           </div>
 
-          {(workflowType === 'accrual') && (
-            <div>
-              <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>
-                Account Code
-              </label>
-              <input
-                type="text"
-                value={accountCode}
-                onChange={(e) => setAccountCode(e.target.value)}
-                placeholder="e.g. 1010"
-                style={{
-                  width: '100%',
-                  padding: '0.6rem 0.8rem',
-                  borderRadius: 'var(--radius-sm)',
-                  background: 'var(--bg-secondary)',
-                  border: '1px solid var(--border-color)',
-                  color: 'var(--text-primary)',
-                  fontSize: '0.875rem',
-                }}
-              />
-            </div>
-          )}
-
           <div>
             <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>
               Period
             </label>
-            {workflowType === 'reconciliation' && availablePeriods.length > 0 ? (
+            {availablePeriods.length > 0 ? (
               <select
+                aria-label="Period"
                 value={period}
                 onChange={(e) => setPeriod(e.target.value)}
                 style={{ width: '100%', padding: '0.6rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', fontSize: '0.875rem' }}
@@ -272,10 +247,12 @@ export default function ReconciliationPage() {
               </select>
             ) : (
               <input
+                aria-label="Period"
+                required
                 type="text"
                 value={period}
                 onChange={(e) => setPeriod(e.target.value)}
-                placeholder="e.g. 2026-Q1"
+                placeholder="e.g. 2026-09"
                 style={{ width: '100%', padding: '0.6rem 0.8rem', borderRadius: 'var(--radius-sm)', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', fontSize: '0.875rem' }}
               />
             )}
@@ -284,7 +261,7 @@ export default function ReconciliationPage() {
           <div>
             <button
               type="submit"
-              disabled={isRunning || (workflowType === 'reconciliation' && (!previewData || previewData.detected_accounts?.length === 0 || (previewData.total_gl_transactions === 0 && previewData.total_bank_transactions === 0)))}
+              disabled={isRunning || !period.trim() || (workflowType === 'reconciliation' && (!previewData || previewData.detected_accounts?.length === 0 || (previewData.total_gl_transactions === 0 && previewData.total_bank_transactions === 0)))}
               className="btn btn-primary"
               style={{ width: '100%', padding: '0.65rem 1rem' }}
             >
@@ -302,6 +279,12 @@ export default function ReconciliationPage() {
             </button>
           </div>
         </form>
+        <p style={{ marginTop: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+          Eligible accounts and records are detected automatically for the selected period.
+          {workflowType === 'accrual' && ' Reviews all active accrual accounts with posted activity.'}
+          {workflowType === 'depreciation' && ' Reviews active assets in service during the period.'}
+          {workflowType === 'ap_review' && ' Reviews invoices dated within the period.'}
+        </p>
 
         {/* Unresolved Mappings Card */}
         {workflowType === 'reconciliation' && unresolvedMappings.length > 0 && (

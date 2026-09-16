@@ -11,7 +11,10 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
+
+from app.financial_engine.periods import period_bounds, ledger_period_filter
 
 
 class FinancialMCPTools:
@@ -177,7 +180,7 @@ class FinancialMCPTools:
         finally:
             session.close()
 
-    async def query_gl_transactions(self, account_code: str, limit: int = 50, fiscal_period: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def query_gl_transactions(self, account_code: str, limit: int = 50, fiscal_period: Optional[str] = None, offset: int = 0) -> List[Dict[str, Any]]:
         """Canonical postings only; signed amount is debit minus credit.
 
         Original debit/credit columns and draft status remain visible. No source
@@ -195,9 +198,9 @@ class FinancialMCPTools:
                         JournalEntry.organization_id == self.organization_id,
                         JournalEntry.currency_code == Account.currency_code))
             if fiscal_period:
-                query = query.filter(JournalEntry.fiscal_period == fiscal_period.strip())
+                query = query.filter(ledger_period_filter(JournalEntry.fiscal_period, JournalEntry.entry_date, fiscal_period))
             rows = (query.order_by(JournalEntry.entry_date.desc(), JournalLine.id)
-                .limit(limit).all())
+                .offset(offset).limit(limit).all())
             return [{'id':line.id,'source':'GL','account_code':account.account_code,
                      'transaction_date':self._serialize_datetime(entry.entry_date),
                      'amount':float(line.debit_amount-line.credit_amount),
@@ -210,7 +213,7 @@ class FinancialMCPTools:
         finally:
             session.close()
 
-    async def query_bank_transactions(self, account_code: str, limit: int = 50, fiscal_period: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def query_bank_transactions(self, account_code: str, limit: int = 50, fiscal_period: Optional[str] = None, offset: int = 0) -> List[Dict[str, Any]]:
         """Independent canonical bank statements linked to the requested GL account."""
         from app.database.models import Account, BankAccount, BankTransaction
         self._validate_limit(limit)
@@ -226,25 +229,11 @@ class FinancialMCPTools:
                         BankAccount.currency_code == Account.currency_code))
             
             if fiscal_period:
-                if len(fiscal_period) == 4 and fiscal_period.isdigit():
-                    from datetime import datetime
-                    year = int(fiscal_period)
-                    start_date = datetime(year, 1, 1)
-                    end_date = datetime(year, 12, 31, 23, 59, 59)
-                    query = query.filter(BankTransaction.booking_date >= start_date, BankTransaction.booking_date <= end_date)
-                elif "-" in fiscal_period:
-                    try:
-                        year, month = map(int, fiscal_period.split("-")[:2])
-                        from datetime import datetime
-                        import calendar
-                        start_date = datetime(year, month, 1)
-                        end_date = datetime(year, month, calendar.monthrange(year, month)[1], 23, 59, 59)
-                        query = query.filter(BankTransaction.booking_date >= start_date, BankTransaction.booking_date <= end_date)
-                    except Exception:
-                        pass
-                        
+                start, end = period_bounds(fiscal_period)
+                query = query.filter(BankTransaction.booking_date >= start, BankTransaction.booking_date < end)
+
             rows = (query.order_by(BankTransaction.booking_date.desc(), BankTransaction.id)
-                .limit(limit).all())
+                .offset(offset).limit(limit).all())
             return [{'id':row.id,'source':'BANK','account_code':account.account_code,
                      'transaction_date':self._serialize_datetime(row.booking_date),
                      'amount':float(row.amount),'currency_code':row.currency_code,
@@ -290,7 +279,7 @@ class FinancialMCPTools:
             session.close()
 
     async def query_fixed_assets(
-        self, category: Optional[str] = None, status: Optional[str] = None, limit: int = 50
+        self, category: Optional[str] = None, status: Optional[str] = None, limit: int = 50, fiscal_period: Optional[str] = None, offset: int = 0
     ) -> List[Dict[str, Any]]:
         """Query canonical fixed assets register records with lifecycle parameters."""
         from app.database.models import FixedAsset
@@ -302,7 +291,12 @@ class FinancialMCPTools:
                 query = query.filter(FixedAsset.category.ilike(f"%{category.strip()}%"))
             if status:
                 query = query.filter(FixedAsset.status == status.strip().upper())
-            rows = query.order_by(FixedAsset.asset_name.asc(), FixedAsset.id).limit(limit).all()
+            if fiscal_period:
+                start, end = period_bounds(fiscal_period)
+                service_date = func.coalesce(FixedAsset.in_service_date, FixedAsset.acquisition_date)
+                query = query.filter(service_date < end,
+                    or_(FixedAsset.disposal_date.is_(None), FixedAsset.disposal_date >= start))
+            rows = query.order_by(FixedAsset.asset_name.asc(), FixedAsset.id).offset(offset).limit(limit).all()
             return [
                 {
                     "id": asset.id,
@@ -332,7 +326,7 @@ class FinancialMCPTools:
             session.close()
 
     async def query_ap_invoices(
-        self, vendor_name: Optional[str] = None, status: Optional[str] = None, limit: int = 50
+        self, vendor_name: Optional[str] = None, status: Optional[str] = None, limit: int = 50, fiscal_period: Optional[str] = None, offset: int = 0
     ) -> List[Dict[str, Any]]:
         """Query canonical accounts payable invoices."""
         from app.database.models import APInvoice
@@ -344,7 +338,10 @@ class FinancialMCPTools:
                 query = query.filter(APInvoice.vendor_name.ilike(f"%{vendor_name.strip()}%"))
             if status:
                 query = query.filter(APInvoice.status == status.strip().upper())
-            rows = query.order_by(APInvoice.invoice_date.desc(), APInvoice.id).limit(limit).all()
+            if fiscal_period:
+                start, end = period_bounds(fiscal_period)
+                query = query.filter(APInvoice.invoice_date >= start, APInvoice.invoice_date < end)
+            rows = query.order_by(APInvoice.invoice_date.desc(), APInvoice.id).offset(offset).limit(limit).all()
             return [
                 {
                     "id": inv.id,
@@ -754,5 +751,25 @@ class FinancialMCPTools:
                         }
 
             return lineage
+        finally:
+            session.close()
+
+    async def query_accrual_accounts(self, fiscal_period: str) -> List[Dict[str, Any]]:
+        """Detect active accrual accounts with posted activity in the selected period."""
+        from app.database.models import Account, JournalEntry, JournalLine
+        start, end = period_bounds(fiscal_period)
+        session = self._get_session()
+        try:
+            rows = (session.query(Account)
+                .join(JournalLine, JournalLine.account_id == Account.id)
+                .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
+                .filter(Account.organization_id == self.organization_id,
+                    JournalEntry.organization_id == self.organization_id,
+                    Account.is_active.is_(True), JournalEntry.status == "POSTED",
+                    JournalEntry.currency_code == Account.currency_code,
+                    or_(Account.account_name.ilike("%accru%"), JournalEntry.entry_type == "ACCRUAL"),
+                    ledger_period_filter(JournalEntry.fiscal_period, JournalEntry.entry_date, fiscal_period))
+                .distinct().order_by(Account.account_code).all())
+            return [{"account_code": row.account_code, "account_name": row.account_name} for row in rows]
         finally:
             session.close()

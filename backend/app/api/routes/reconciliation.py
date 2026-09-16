@@ -199,8 +199,8 @@ class AccrualRunRequest(BaseRunRequest):
 
     @model_validator(mode="after")
     def validate_source(self) -> "AccrualRunRequest":
-        if not self.accrual_entries and not self.account_code:
-            raise ValueError("Accrual workflow requires either explicit accrual_entries or account_code.")
+        if self.accrual_entries == []:
+            raise ValueError("Explicit accrual_entries cannot be empty; omit them to detect accounts automatically.")
         if self.accrual_entries is not None and self.historical_baseline is None:
             raise ValueError("Accrual workflow requires historical_baseline when explicit accrual_entries are provided.")
         return self

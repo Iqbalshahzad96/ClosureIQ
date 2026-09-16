@@ -50,7 +50,7 @@ export default function FinancialUploadPage({ setActiveTab }) {
     setNeedsDocumentTypeChoice(false);
   };
 
-  const handleUploadAndValidate = async (forceDocumentType = false) => {
+  const handleUploadAndValidate = async (forceDocumentType = false, overrideDocumentType = null) => {
     if (isUploading || !selectedFile) return;
 
     const preError = validateFileClientSide(selectedFile);
@@ -74,8 +74,9 @@ export default function FinancialUploadPage({ setActiveTab }) {
       const staged = await stageFinancialFile({ file: selectedFile, signal: abortController.signal });
       const detected = staged.detected_context || {};
       const detectedDocType = detected.documentType;
+      const forcedDocumentType = overrideDocumentType || selectedDocType;
       const detectedDocConfig = forceDocumentType
-        ? getDocumentTypeConfig(selectedDocType)
+        ? getDocumentTypeConfig(forcedDocumentType)
         : getDocumentTypeConfig(
           Object.values(DOCUMENT_TYPES).find((doc) => doc.id === detectedDocType || doc.id.toUpperCase() === detectedDocType)?.id
             || Object.values(DOCUMENT_TYPES).find((doc) => doc.label.toUpperCase().replaceAll(' ', '_') === detectedDocType)?.id
@@ -107,7 +108,7 @@ export default function FinancialUploadPage({ setActiveTab }) {
 
       if (currentRequestId !== requestIdRef.current) return;
       setImportResult(result);
-      if (result.status === 'FAILED' && !forceDocumentType) {
+      if (result.status === 'FAILED') {
         setNeedsDocumentTypeChoice(true);
       }
       // Trigger database refresh
@@ -191,7 +192,10 @@ export default function FinancialUploadPage({ setActiveTab }) {
               role="radio"
               aria-checked={isSelected}
               disabled={isUploading}
-              onClick={() => setSelectedDocType(doc.id)}
+              onClick={() => {
+                setSelectedDocType(doc.id);
+                setUploadError(null);
+              }}
               style={{
                 padding: '0.85rem',
                 borderRadius: 'var(--radius-sm)',
@@ -212,7 +216,7 @@ export default function FinancialUploadPage({ setActiveTab }) {
       </div>
       <button
         type="button"
-        onClick={() => handleUploadAndValidate(true)}
+        onClick={() => handleUploadAndValidate(true, selectedDocType)}
         disabled={isUploading || !selectedFile}
         className="btn btn-primary"
         style={{ alignSelf: 'flex-start', padding: '0.65rem 1rem' }}
@@ -330,7 +334,7 @@ export default function FinancialUploadPage({ setActiveTab }) {
                 </div>
                 <button
                   type="button"
-                  onClick={handleUploadAndValidate}
+                  onClick={() => handleUploadAndValidate(needsDocumentTypeChoice, selectedDocType)}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -385,7 +389,7 @@ export default function FinancialUploadPage({ setActiveTab }) {
 
                 <button
                   type="button"
-                  onClick={handleUploadAndValidate}
+                  onClick={() => handleUploadAndValidate(needsDocumentTypeChoice, selectedDocType)}
                   disabled={isUploading || !selectedFile || Boolean(fileError)}
                   data-testid="upload-and-validate-btn"
                   style={{
